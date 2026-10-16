@@ -1,21 +1,16 @@
+#include <math.h>
 #include "raylib.h"
 #include "building.h"
 
+/* Must match the window size in main.c */
+#define SCREEN_W 800
+#define SCREEN_H 450
+
 #define MARGIN   20
-#define BTN_W    150
-#define BTN_H    40
+#define BTN_W    120
+#define BTN_H    36
 #define BTN_GAP  10
-#define BTN_Y    20
-
-/* 2D room drawing area (left) and readout panel (right) */
-#define ROOM_X   20
-#define ROOM_Y   80
-#define ROOM_W   520
-#define ROOM_H   350
-#define PANEL_X  560
-#define PANEL_W  220
-
-#define LAMP_R   22
+#define BTN_Y    (SCREEN_H - 62)
 
 static Rectangle button_rect(int i)
 {
@@ -27,14 +22,14 @@ static Rectangle button_rect(int i)
     };
 }
 
-static Vector2 lamp_centre(void)
+static Rectangle light_btn_rect(void)
 {
-    return (Vector2){ ROOM_X + ROOM_W / 2.0f, ROOM_Y + ROOM_H / 2.0f };
+    return (Rectangle){ SCREEN_W - 230, BTN_Y, 100, BTN_H };
 }
 
-static Rectangle door_rect(void)
+static Rectangle door_btn_rect(void)
 {
-    return (Rectangle){ ROOM_X + ROOM_W / 2.0f - 40, ROOM_Y + ROOM_H - 10, 80, 20 };
+    return (Rectangle){ SCREEN_W - 120, BTN_Y, 100, BTN_H };
 }
 
 static Color alert_colour(AlertLevel a)
@@ -55,8 +50,20 @@ static Color temp_colour(float t)
     return (Color){ (unsigned char)(60 + 195 * f), 80, (unsigned char)(255 - 195 * f), 255 };
 }
 
+/* scale a colour's brightness (k = 1.0 normal, lower = darker) */
+static Color shade(Color c, float k)
+{
+    return (Color){ (unsigned char)(c.r * k), (unsigned char)(c.g * k),
+                    (unsigned char)(c.b * k), 255 };
+}
+
 void ui_handle_input(Building *b)
 {
+    if (b->state != GAME_PLAYING) {
+        if (IsKeyPressed(KEY_R)) building_init(b);   /* restart the night */
+        return;
+    }
+
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         Vector2 mouse = GetMousePosition();
 
@@ -67,112 +74,189 @@ void ui_handle_input(Building *b)
         }
 
         Room *room = &b->rooms[b->selectedRoom];
-
-        /* click the lamp to toggle lights, click the door to lock/unlock */
-        if (CheckCollisionPointCircle(mouse, lamp_centre(), LAMP_R)) {
+        if (CheckCollisionPointRec(mouse, light_btn_rect())) {
             room_set_lights(room, !room->actuators.lightsOn);
         }
-        if (CheckCollisionPointRec(mouse, door_rect())) {
+        if (CheckCollisionPointRec(mouse, door_btn_rect())) {
             room_set_lock(room, !room->actuators.doorLocked);
         }
     }
 
-    /* TEMPORARY test key: M fakes motion until the simulation does it */
+    /* TEMPORARY test keys until the simulation does these itself */
     if (IsKeyPressed(KEY_M)) {
         Room *room = &b->rooms[b->selectedRoom];
         room->sensors.motionDetected = !room->sensors.motionDetected;
     }
+    if (IsKeyPressed(KEY_K)) game_lose(b);
+}
+
+/* Different furniture per room so each camera looks distinct */
+static void draw_furniture(int id, float k)
+{
+    Color wood  = shade((Color){ 110, 80, 50, 255 }, k);
+    Color metal = shade((Color){ 70, 75, 85, 255 }, k);
+
+    switch (id % 4) {
+        case 0: /* lobby: reception desk and bench */
+            DrawCube((Vector3){ -2.0f, 0.5f, -1.5f }, 3.2f, 1.0f, 1.0f, wood);
+            DrawCube((Vector3){ -3.6f, 0.3f, 1.5f }, 1.0f, 0.6f, 3.0f, metal);
+            break;
+        case 1: /* office: desk with a glowing monitor */
+            DrawCube((Vector3){ -1.5f, 0.45f, -1.0f }, 3.0f, 0.9f, 1.4f, wood);
+            DrawCube((Vector3){ -1.5f, 1.3f, -1.4f }, 1.0f, 0.7f, 0.1f,
+                     (Color){ 40, 90, 120, 255 });
+            break;
+        case 2: /* server room: racks with status lights */
+            for (int i = 0; i < 3; i++) {
+                float x = -3.6f + i * 1.6f;
+                DrawCube((Vector3){ x, 1.2f, -3.2f }, 1.2f, 2.4f, 1.0f, metal);
+                DrawSphere((Vector3){ x + 0.3f, 1.8f, -2.65f }, 0.06f, GREEN);
+                DrawSphere((Vector3){ x - 0.3f, 1.5f, -2.65f }, 0.06f,
+                           (Color){ 60, 140, 255, 255 });
+            }
+            break;
+        default: /* kitchen: counter along the left wall and a table */
+            DrawCube((Vector3){ -4.3f, 0.5f, 0.0f }, 1.0f, 1.0f, 6.0f, metal);
+            DrawCube((Vector3){ 0.0f, 0.4f, -0.5f }, 2.0f, 0.8f, 1.4f, wood);
+            break;
+    }
+}
+
+/* The "camera feed": a fixed camera in the corner of the room, slowly panning */
+static void draw_room_3d(const Room *room, float t)
+{
+    float k = room->actuators.lightsOn ? 1.0f : 0.22f;
+    if (room->actuators.lightsOn && GetRandomValue(0, 90) == 0) k = 0.6f; /* flicker */
+
+    Camera3D cam = { 0 };
+    cam.position   = (Vector3){ 4.6f, 3.2f, 3.7f };
+    cam.target     = (Vector3){ -0.5f + sinf(t * 0.5f) * 1.5f, 1.0f, -1.5f };
+    cam.up         = (Vector3){ 0.0f, 1.0f, 0.0f };
+    cam.fovy       = 70.0f;
+    cam.projection = CAMERA_PERSPECTIVE;
+
+    BeginMode3D(cam);
+
+    /* floor and walls (the camera side is left open) */
+    DrawPlane((Vector3){ 0.0f, 0.0f, 0.0f }, (Vector2){ 10.0f, 8.0f },
+              shade((Color){ 90, 90, 100, 255 }, k));
+    Color wall = shade((Color){ 120, 115, 110, 255 }, k);
+    DrawCube((Vector3){ 0.0f, 1.75f, -4.0f }, 10.0f, 3.5f, 0.2f, wall);
+    DrawCube((Vector3){ -5.0f, 1.75f, 0.0f }, 0.2f, 3.5f, 8.0f, wall);
+
+    /* door on the back wall: red = locked, green = unlocked */
+    Color doorCol = room->actuators.doorLocked ? (Color){ 200, 40, 40, 255 }
+                                               : (Color){ 40, 180, 70, 255 };
+    DrawCube((Vector3){ 2.5f, 1.1f, -3.85f }, 1.6f, 2.2f, 0.15f,
+             shade(doorCol, 0.5f + 0.5f * k));
+
+    /* HVAC vent: colour shows the temperature */
+    DrawCube((Vector3){ -2.5f, 3.0f, -3.85f }, 2.0f, 0.3f, 0.15f,
+             room->actuators.hvacOn ? temp_colour(room->sensors.temperature) : GRAY);
+
+    /* ceiling light */
+    DrawSphere((Vector3){ 0.0f, 3.2f, 0.0f }, 0.25f,
+               room->actuators.lightsOn ? YELLOW : DARKGRAY);
+
+    draw_furniture(room->id, k);
+
+    /* something moving: a dark figure with glowing eyes (fake until intruders exist) */
+    if (room->sensors.motionDetected) {
+        float fx = -3.0f + fmodf(t * 1.0f, 6.0f);
+        float fz = 1.0f;
+        DrawCylinder((Vector3){ fx, 0.0f, fz }, 0.35f, 0.45f, 1.6f, 12,
+                     (Color){ 30, 30, 30, 255 });
+        DrawSphere((Vector3){ fx, 1.9f, fz }, 0.4f, (Color){ 60, 50, 40, 255 });
+        DrawSphere((Vector3){ fx - 0.15f, 1.95f, fz + 0.33f }, 0.07f, RAYWHITE);
+        DrawSphere((Vector3){ fx + 0.15f, 1.95f, fz + 0.33f }, 0.07f, RAYWHITE);
+    }
+
+    EndMode3D();
+}
+
+/* CRT look: scanlines, static and dark edges */
+static void draw_camera_overlay(void)
+{
+    for (int y = 0; y < SCREEN_H; y += 3) {
+        DrawRectangle(0, y, SCREEN_W, 1, Fade(BLACK, 0.25f));
+    }
+    for (int i = 0; i < 150; i++) {
+        DrawRectangle(GetRandomValue(0, SCREEN_W), GetRandomValue(0, SCREEN_H),
+                      GetRandomValue(1, 3), 1, Fade(RAYWHITE, 0.15f));
+    }
+    DrawRectangleGradientV(0, 0, SCREEN_W, 100, Fade(BLACK, 0.8f), Fade(BLACK, 0.0f));
+    DrawRectangleGradientV(0, SCREEN_H - 100, SCREEN_W, 100, Fade(BLACK, 0.0f), Fade(BLACK, 0.8f));
+    DrawRectangleGradientH(0, 0, 120, SCREEN_H, Fade(BLACK, 0.8f), Fade(BLACK, 0.0f));
+    DrawRectangleGradientH(SCREEN_W - 120, 0, 120, SCREEN_H, Fade(BLACK, 0.0f), Fade(BLACK, 0.8f));
 }
 
 void ui_draw(const Building *b)
 {
-    ClearBackground(DARKGRAY);
+    const Room *room = &b->rooms[b->selectedRoom];
+    float t = (float)GetTime();
 
-    /* Room selector row */
+    ClearBackground(BLACK);
+    draw_room_3d(room, t);
+    draw_camera_overlay();
+
+    /* camera label and blinking REC dot (top left) */
+    DrawText(TextFormat("CAM %d  %s", room->id + 1, room->name), MARGIN, 18, 24, RAYWHITE);
+    if (((int)(t * 2.0f)) % 2 == 0) DrawCircle(MARGIN + 8, 58, 7, RED);
+    DrawText("REC", MARGIN + 24, 50, 18, RAYWHITE);
+
+    /* night clock (top right) */
+    int hour = building_hour(b);
+    DrawText(TextFormat("%d AM", hour == 0 ? 12 : hour), SCREEN_W - 110, 18, 30, RAYWHITE);
+
+    /* alert (top centre) */
+    if (room->alert != ALERT_NONE) {
+        DrawText(room->alert == ALERT_CRITICAL ? "! CRITICAL" : "! WARNING",
+                 SCREEN_W / 2 - 60, 20, 24, alert_colour(room->alert));
+    }
+
+    /* readout line */
+    DrawText(TextFormat("TEMP %.1fC (TARGET %.1fC)   MOTION: %s   DOOR: %s   LIGHTS: %s",
+                        room->sensors.temperature, room->sensors.targetTemp,
+                        room->sensors.motionDetected ? "YES" : "no",
+                        room->actuators.doorLocked ? "locked" : "unlocked",
+                        room->actuators.lightsOn ? "on" : "off"),
+             MARGIN, SCREEN_H - 90, 16, RAYWHITE);
+
+    /* camera buttons (bottom left) */
     for (int i = 0; i < b->roomCount; i++) {
         Rectangle r = button_rect(i);
-        bool selected = (i == b->selectedRoom);
-
-        DrawRectangleRec(r, selected ? RAYWHITE : GRAY);
-        DrawRectangleLinesEx(r, 3, alert_colour(b->rooms[i].alert));
-        DrawText(b->rooms[i].name, (int)r.x + 10, (int)r.y + 11, 18,
-                 selected ? BLACK : RAYWHITE);
+        bool sel = (i == b->selectedRoom);
+        DrawRectangleRec(r, sel ? Fade(RAYWHITE, 0.85f) : Fade(BLACK, 0.6f));
+        DrawRectangleLinesEx(r, 2, alert_colour(b->rooms[i].alert));
+        DrawText(b->rooms[i].name, (int)r.x + 8, (int)r.y + 10, 16,
+                 sel ? BLACK : RAYWHITE);
     }
 
-    const Room *room = &b->rooms[b->selectedRoom];
+    /* light and door buttons (bottom right) */
+    Rectangle lb = light_btn_rect();
+    DrawRectangleRec(lb, Fade(BLACK, 0.6f));
+    DrawRectangleLinesEx(lb, 2, room->actuators.lightsOn ? YELLOW : GRAY);
+    DrawText("LIGHTS", (int)lb.x + 14, (int)lb.y + 10, 16,
+             room->actuators.lightsOn ? YELLOW : GRAY);
 
-    /* ---- 2D room: floor and walls ---- */
-    Color floor = room->actuators.lightsOn ? (Color){ 80, 80, 92, 255 }
-                                           : (Color){ 28, 28, 34, 255 };
-    DrawRectangle(ROOM_X, ROOM_Y, ROOM_W, ROOM_H, floor);
+    Rectangle db = door_btn_rect();
+    bool locked = room->actuators.doorLocked;
+    DrawRectangleRec(db, Fade(BLACK, 0.6f));
+    DrawRectangleLinesEx(db, 2, locked ? RED : GREEN);
+    DrawText(locked ? "LOCKED" : "UNLOCKED", (int)db.x + 12, (int)db.y + 10, 16,
+             locked ? RED : GREEN);
 
-    /* ---- ceiling light: glow when on, click to toggle ---- */
-    Vector2 lamp = lamp_centre();
-    if (room->actuators.lightsOn) {
-        DrawCircle((int)lamp.x, (int)lamp.y, 120, (Color){ 255, 230, 120, 20 });
-        DrawCircle((int)lamp.x, (int)lamp.y, 85,  (Color){ 255, 230, 120, 35 });
-        DrawCircle((int)lamp.x, (int)lamp.y, 55,  (Color){ 255, 230, 120, 55 });
-        DrawCircle((int)lamp.x, (int)lamp.y, LAMP_R, YELLOW);
-    } else {
-        DrawCircle((int)lamp.x, (int)lamp.y, LAMP_R, DARKGRAY);
+    DrawText("TEST KEYS: M = fake motion, K = end night", MARGIN, SCREEN_H - 20, 12, GRAY);
+
+    /* end of night: shown over everything, no menu */
+    if (b->state != GAME_PLAYING) {
+        DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade(BLACK, 0.85f));
+        const char *msg = (b->state == GAME_WON) ? "6 AM - YOU SURVIVED" : "GAME OVER";
+        int w = MeasureText(msg, 50);
+        DrawText(msg, (SCREEN_W - w) / 2, 170, 50, (b->state == GAME_WON) ? GREEN : RED);
+
+        const char *hint = "Press R to restart";
+        int hw = MeasureText(hint, 20);
+        DrawText(hint, (SCREEN_W - hw) / 2, 240, 20, GRAY);
     }
-    DrawCircleLines((int)lamp.x, (int)lamp.y, LAMP_R, RAYWHITE);
-    DrawText("LIGHT", (int)lamp.x - 22, (int)lamp.y + LAMP_R + 6, 14, RAYWHITE);
-
-    /* ---- HVAC vent on the top wall: colour shows the temperature ---- */
-    Rectangle vent = { ROOM_X + 60, ROOM_Y + 10, 140, 16 };
-    DrawRectangleRec(vent, room->actuators.hvacOn ? temp_colour(room->sensors.temperature) : GRAY);
-    DrawText(room->actuators.hvacOn ? "HVAC ON" : "HVAC OFF",
-             (int)vent.x, (int)vent.y + 22, 14, RAYWHITE);
-
-    /* ---- smoke detector (top left): flashes red on smoke ---- */
-    bool flash = ((int)(GetTime() * 4)) % 2 == 0;
-    Color smokeCol = (room->sensors.smokeDetected && flash) ? RED : DARKGRAY;
-    DrawCircle(ROOM_X + 30, ROOM_Y + 70, 10, smokeCol);
-    DrawCircleLines(ROOM_X + 30, ROOM_Y + 70, 10, RAYWHITE);
-    DrawText("SMOKE", ROOM_X + 12, ROOM_Y + 86, 12, RAYWHITE);
-
-    /* ---- motion sensor (top right): pulses and shows a figure on motion ---- */
-    int mx = ROOM_X + ROOM_W - 40;
-    int my = ROOM_Y + 50;
-    DrawCircle(mx, my, 10, room->sensors.motionDetected ? RED : DARKGRAY);
-    DrawCircleLines(mx, my, 10, RAYWHITE);
-    DrawText("MOTION", mx - 26, my + 16, 12, RAYWHITE);
-    if (room->sensors.motionDetected) {
-        int pulse = 12 + ((int)(GetTime() * 40)) % 30;
-        DrawCircleLines(mx, my, (float)pulse, RED);
-
-        int px = ROOM_X + 80 + ((int)(GetTime() * 60)) % (ROOM_W - 160);
-        DrawCircle(px, ROOM_Y + ROOM_H / 2 + 80, 10, ORANGE);
-    }
-
-    /* ---- door on the bottom wall: red = locked, green = unlocked ---- */
-    Rectangle door = door_rect();
-    DrawRectangleRec(door, room->actuators.doorLocked ? RED : GREEN);
-    DrawText(room->actuators.doorLocked ? "DOOR LOCKED" : "DOOR UNLOCKED",
-             (int)door.x - 10, (int)door.y - 20, 14, RAYWHITE);
-
-    /* ---- walls on top, coloured by the room's alert level ---- */
-    DrawRectangleLinesEx((Rectangle){ ROOM_X, ROOM_Y, ROOM_W, ROOM_H }, 8,
-                         alert_colour(room->alert));
-
-    /* ---- readout panel ---- */
-    int x = PANEL_X + 15;
-    int y = ROOM_Y + 15;
-    DrawRectangle(PANEL_X, ROOM_Y, PANEL_W, ROOM_H, BLACK);
-    DrawText(room->name, x, y, 24, RAYWHITE);
-    DrawText(TextFormat("Temp: %.1f C", room->sensors.temperature), x, y + 45, 18, RAYWHITE);
-    DrawText(TextFormat("Target: %.1f C", room->sensors.targetTemp), x, y + 75, 18, RAYWHITE);
-    DrawText(TextFormat("Motion: %s", room->sensors.motionDetected ? "YES" : "no"),
-             x, y + 105, 18, RAYWHITE);
-    DrawText(TextFormat("Door: %s", room->actuators.doorLocked ? "locked" : "unlocked"),
-             x, y + 135, 18, RAYWHITE);
-    DrawText(TextFormat("Lights: %s", room->actuators.lightsOn ? "on" : "off"),
-             x, y + 165, 18, RAYWHITE);
-    DrawText(room->alert == ALERT_CRITICAL ? "Status: CRITICAL"
-             : room->alert == ALERT_WARNING ? "Status: WARNING" : "Status: OK",
-             x, y + 195, 18, alert_colour(room->alert));
-
-    DrawText("Click lamp / door to toggle", x, y + 265, 12, GRAY);
-    DrawText("M = fake motion (test)",       x, y + 285, 12, GRAY);
 }

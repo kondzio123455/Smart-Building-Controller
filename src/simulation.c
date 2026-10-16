@@ -48,7 +48,14 @@ void room_evaluate_alert(Room *r)
 
 void building_update(Building *b, float dt)
 {
-    (void)dt; /* unused until we add temperature drift and motion events */
+    if (b->state != GAME_PLAYING) return;
+
+    b->nightTime += dt;
+    if (b->nightTime >= NIGHT_HOURS * SECONDS_PER_HOUR) {
+        b->nightTime = NIGHT_HOURS * SECONDS_PER_HOUR;
+        b->state = GAME_WON;
+        return;
+    }
 
     for (int i = 0; i < b->roomCount; i++) {
         room_evaluate_alert(&b->rooms[i]);
@@ -68,4 +75,15 @@ void room_set_lock(Room *r, bool locked)
 void room_set_target_temp(Room *r, float temp)
 {
     r->sensors.targetTemp = temp;
+}
+
+int building_hour(const Building *b)
+{
+    int hour = (int)(b->nightTime / SECONDS_PER_HOUR);
+    return hour > NIGHT_HOURS ? NIGHT_HOURS : hour;
+}
+
+void game_lose(Building *b)
+{
+    b->state = GAME_OVER;
 }
