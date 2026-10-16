@@ -68,8 +68,4 @@ void room_set_lock(Room *r, bool locked)
 void room_set_target_temp(Room *r, float temp)
 {
     r->sensors.targetTemp = temp;
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> 8db6e5373520673af98202f2fd369c8089221168

@@ -1,4 +1,3 @@
-
 #include "raylib.h"
 #include "building.h"
 
@@ -17,17 +16,6 @@
 #define PANEL_W  220
 
 #define LAMP_R   22
-=======
-#include "raylib.h"
-#include "building.h"
-
-#define MARGIN  20
-#define BTN_W   150
-#define BTN_H   40
-#define BTN_GAP 10
-#define BTN_Y   20
-#define PANEL_Y 80
-
 
 static Rectangle button_rect(int i)
 {
@@ -39,7 +27,6 @@ static Rectangle button_rect(int i)
     };
 }
 
-
 static Vector2 lamp_centre(void)
 {
     return (Vector2){ ROOM_X + ROOM_W / 2.0f, ROOM_Y + ROOM_H / 2.0f };
@@ -50,7 +37,6 @@ static Rectangle door_rect(void)
     return (Rectangle){ ROOM_X + ROOM_W / 2.0f - 40, ROOM_Y + ROOM_H - 10, 80, 20 };
 }
 
-
 static Color alert_colour(AlertLevel a)
 {
     switch (a) {
@@ -59,7 +45,6 @@ static Color alert_colour(AlertLevel a)
         default:             return GREEN;
     }
 }
-
 
 /* blue when cold, red when hot (15 C to 30 C) */
 static Color temp_colour(float t)
@@ -70,13 +55,10 @@ static Color temp_colour(float t)
     return (Color){ (unsigned char)(60 + 195 * f), 80, (unsigned char)(255 - 195 * f), 255 };
 }
 
-
 void ui_handle_input(Building *b)
 {
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         Vector2 mouse = GetMousePosition();
-<<<<<<< HEAD
-
 
         for (int i = 0; i < b->roomCount; i++) {
             if (CheckCollisionPointRec(mouse, button_rect(i))) {
@@ -99,7 +81,6 @@ void ui_handle_input(Building *b)
     if (IsKeyPressed(KEY_M)) {
         Room *room = &b->rooms[b->selectedRoom];
         room->sensors.motionDetected = !room->sensors.motionDetected;
-
     }
 }
 
@@ -195,26 +176,3 @@ void ui_draw(const Building *b)
     DrawText("Click lamp / door to toggle", x, y + 265, 12, GRAY);
     DrawText("M = fake motion (test)",       x, y + 285, 12, GRAY);
 }
-
-    /* Selected room panel */
-    const Room *room = &b->rooms[b->selectedRoom];
-    int x = MARGIN + 20;
-    int y = PANEL_Y + 20;
-
-    DrawRectangle(MARGIN, PANEL_Y, 760, 340, BLACK);
-    DrawText(room->name, x, y, 30, RAYWHITE);
-
-    DrawText(TextFormat("Temperature: %.1f C (target %.1f C)",
-                        room->sensors.temperature, room->sensors.targetTemp),
-             x, y + 50, 20, RAYWHITE);
-    DrawText(TextFormat("Motion: %s",
-                        room->sensors.motionDetected ? "DETECTED" : "none"),
-             x, y + 85, 20, RAYWHITE);
-    DrawText(TextFormat("Door: %s",
-                        room->actuators.doorLocked ? "locked" : "unlocked"),
-             x, y + 120, 20, RAYWHITE);
-    DrawText(TextFormat("Lights: %s",
-                        room->actuators.lightsOn ? "on" : "off"),
-             x, y + 155, 20, RAYWHITE);
-}
-
