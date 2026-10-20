@@ -3,21 +3,28 @@
 
 #include <stdbool.h>
 
-#define MAX_ROOMS     8
-#define ROOM_NAME_LEN 32
+#define MAX_ROOMS         8
+#define ROOM_NAME_LEN     32
+#define MAX_INTRUDERS     5
+#define INTRUDER_NAME_LEN 16
 
-/* What the room "reads" - updated by the simulation each frame */
+/* The Office is where you sit. An intruder getting in here ends the night. */
+#define GOAL_ROOM         0
+
+/* Night runs 12 AM to 6 AM. Lower SECONDS_PER_HOUR to test quickly. */
+#define NIGHT_HOURS       6
+#define SECONDS_PER_HOUR  90.0f
+
 typedef struct {
-    float temperature;      /* current temp in degrees C */
-    float targetTemp;       /* setpoint the HVAC works toward */
+    float temperature;
+    float targetTemp;
     bool  motionDetected;
-    float secondsSinceMotion; /* lets the UI fade the motion indicator */
+    float secondsSinceMotion;
     bool  doorOpen;
     bool  smokeDetected;
-    float lightLevel;       /* 0.0 - 1.0 ambient light */
+    float lightLevel;
 } SensorData;
 
-/* What the user can switch from the camera view */
 typedef struct {
     bool lightsOn;
     bool doorLocked;
@@ -26,9 +33,35 @@ typedef struct {
 
 typedef enum {
     ALERT_NONE,
-    ALERT_WARNING,   /* e.g. temp out of range */
-    ALERT_CRITICAL   /* e.g. smoke */
+    ALERT_WARNING,
+    ALERT_CRITICAL
 } AlertLevel;
+
+typedef enum {
+    GAME_PLAYING,
+    GAME_OVER,
+    GAME_WON
+} GameState;
+
+typedef enum {
+    INTRUDER_DRIFTER,   /* walks toward the Office, one room at a time */
+    INTRUDER_SHADE,     /* freezes while a camera is on it */
+    INTRUDER_CRAWLER,   /* uses the vents: can skip a room and its locked door */
+    INTRUDER_GLITCH,    /* kills the lights in whatever room it is in */
+    INTRUDER_LEECH      /* drains extra power while it is loose */
+} IntruderType;
+
+typedef struct {
+    IntruderType type;
+    char  name[INTRUDER_NAME_LEN];
+    int   room;         /* index into Building.rooms */
+    int   home;         /* where it starts, and where it retreats to when blocked */
+    int   startHour;    /* wakes up at this hour of the night */
+    bool  active;
+    float timer;        /* seconds until its next move attempt */
+    float interval;     /* seconds between move attempts */
+    int   aggression;   /* 0-20: chance out of 20 that an attempt succeeds */
+} Intruder;
 
 typedef struct {
     int        id;
@@ -39,22 +72,30 @@ typedef struct {
 } Room;
 
 typedef struct {
-    Room rooms[MAX_ROOMS];
-    int  roomCount;
-    int  selectedRoom;   /* which "camera" the UI is showing */
+    Room      rooms[MAX_ROOMS];
+    int       roomCount;
+    int       selectedRoom;
+    GameState state;
+    float     nightTime;
+
+    Intruder  intruders[MAX_INTRUDERS];
+    int       intruderCount;
+    float     power;        /* 100.0 down to 0.0 */
+    bool      powerOut;
+    int       killer;       /* index of the intruder that got in, or -1 */
 } Building;
 
-/* ---- Simulation layer (one person owns this) ---- */
-void building_init(Building *b);
-void building_update(Building *b, float dt);  /* drift temps, random motion, apply actuators */
-void room_evaluate_alert(Room *r);
+void  building_init(Building *b);
+void  building_update(Building *b, float dt);
+void  room_evaluate_alert(Room *r);
+int   building_hour(const Building *b);
+float building_power_usage(const Building *b);   /* power lost per second */
+void  game_lose(Building *b);
 
-/* ---- Control API (the only way the UI changes state) ---- */
 void room_set_lights(Room *r, bool on);
 void room_set_lock(Room *r, bool locked);
 void room_set_target_temp(Room *r, float temp);
 
-/* ---- UI layer (the other person owns this) ---- */
 void ui_handle_input(Building *b);
 void ui_draw(const Building *b);
 
