@@ -1,6 +1,7 @@
 #include <math.h>
 #include "raylib.h"
 #include "building.h"
+#include "graphs.h"
 
 /* Must match the window size in main.c */
 #define SCREEN_W 800
@@ -266,12 +267,19 @@ static Rectangle door_btn_rect(void)
     return (Rectangle){ MARGIN + 110, BTN_Y, 110, BTN_H };
 }
 
+static Rectangle graph_btn_rect(void)
+{
+    return (Rectangle){ MARGIN + 230, BTN_Y, 100, BTN_H };
+}
+
 static bool on_hud(const Building *b, Vector2 m)
 {
     for (int i = 0; i < b->roomCount; i++) {
         if (CheckCollisionPointRec(m, button_rect(i))) return true;
     }
-    return CheckCollisionPointRec(m, light_btn_rect()) || CheckCollisionPointRec(m, door_btn_rect());
+    return CheckCollisionPointRec(m, light_btn_rect())
+        || CheckCollisionPointRec(m, door_btn_rect())
+        || CheckCollisionPointRec(m, graph_btn_rect());
 }
 
 static Color alert_colour(AlertLevel a)
@@ -347,13 +355,16 @@ void ui_handle_input(Building *b)
         if (IsKeyPressed(KEY_ONE + i)) select_room(b, i);
     }
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    /* while the dashboard is open, the game ignores the mouse */
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !graphs_visible()) {
         Vector2 mouse = GetMousePosition();
 
         if (on_hud(b, mouse)) {
             for (int i = 0; i < b->roomCount; i++) {
                 if (CheckCollisionPointRec(mouse, button_rect(i))) select_room(b, i);
             }
+            if (CheckCollisionPointRec(mouse, graph_btn_rect())) graphs_toggle();
+
             Room *room = &b->rooms[b->selectedRoom];
             if (!b->powerOut) {
                 if (CheckCollisionPointRec(mouse, light_btn_rect())) {
@@ -932,12 +943,12 @@ void ui_draw(const Building *b)
 
     const Room *room = &b->rooms[b->selectedRoom];
 
-    /* what is the mouse pointing at? */
+    /* what is the mouse pointing at? (nothing while the dashboard is open) */
     Hotspot hs[MAX_HOTSPOTS];
     int n = build_hotspots(room->id, hs);
     int hover = -1;
     Vector2 mouse = GetMousePosition();
-    if (b->state == GAME_PLAYING && !on_hud(b, mouse)) {
+    if (b->state == GAME_PLAYING && !graphs_visible() && !on_hud(b, mouse)) {
         hover = pick_hotspot(hs, n, GetMouseRay(mouse, room_camera(room->id, t)));
     }
     SetMouseCursor(hover >= 0 ? MOUSE_CURSOR_POINTING_HAND : MOUSE_CURSOR_DEFAULT);
@@ -1025,7 +1036,7 @@ void ui_draw(const Building *b)
         if (b->rooms[i].sensors.motionDetected) DrawCircle((int)r.x + MAP_W - 8, (int)r.y + 8, 4, RED);
     }
 
-    /* light and door buttons (bottom left) */
+    /* light, door and graphs buttons (bottom left) */
     Rectangle lb = light_btn_rect();
     DrawRectangleRec(lb, Fade(BLACK, 0.6f));
     DrawRectangleLinesEx(lb, 2, room->actuators.lightsOn ? YELLOW : GRAY);
@@ -1039,7 +1050,12 @@ void ui_draw(const Building *b)
     DrawText(locked ? "LOCKED" : "UNLOCKED", (int)db.x + 14, (int)db.y + 10, 16,
              locked ? RED : GREEN);
 
-    DrawText("Click things in the room. 1-6 cameras, L lights, D door, K end night (test)",
+    Rectangle gb = graph_btn_rect();
+    DrawRectangleRec(gb, Fade(BLACK, 0.6f));
+    DrawRectangleLinesEx(gb, 2, SKYBLUE);
+    DrawText("GRAPHS", (int)gb.x + 14, (int)gb.y + 10, 16, SKYBLUE);
+
+    DrawText("Click things in the room. 1-6 cameras, L lights, D door, TAB graphs, K end night (test)",
              MARGIN, SCREEN_H - 20, 12, GRAY);
 
     /* end of night: shown over everything, no menu */

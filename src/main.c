@@ -9,6 +9,7 @@ int main(void)
 
     InitWindow(800, 450, "Smart Building Controller");
     SetTargetFPS(60);
+    ui_init();                                       /* starts the generated sound */
 
     while (!WindowShouldClose()) {
         ui_handle_input(&building);
@@ -21,6 +22,7 @@ int main(void)
         EndDrawing();
     }
 
+    ui_close();
     CloseWindow();
     return 0;
 }

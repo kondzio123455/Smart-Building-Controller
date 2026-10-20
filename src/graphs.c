@@ -16,8 +16,8 @@ typedef struct {
     float roomTemp[MAX_ROOMS][HIST];
     float motion[HIST];
     float vent[HIST];
-    float tOpen[HIST];                /* measured: avg temp, rooms with HVAC on  */
-    float tClosed[HIST];              /* measured: avg temp, rooms with HVAC off */
+    float tOpen[HIST];                /* measured: avg temp, rooms with vent open   */
+    float tClosed[HIST];              /* measured: avg temp, rooms with vent sealed */
 
     float netNow;
     float lastOpen, lastClosed;
@@ -26,6 +26,16 @@ typedef struct {
 } GraphState;
 
 static GraphState G;
+
+void graphs_toggle(void)
+{
+    G.visible = !G.visible;
+}
+
+bool graphs_visible(void)
+{
+    return G.visible;
+}
 
 static void push(float *a, int n, float v)
 {
@@ -62,7 +72,7 @@ static void take_sample(const Building *b)
     }
     if (b->powerOut) net = 0.0f;
 
-    /* temperatures, plus open/closed averages */
+    /* temperatures, plus open/sealed averages */
     float sumOn = 0.0f, sumOff = 0.0f, all = 0.0f;
     int   nOn = 0, nOff = 0;
     for (int i = 0; i < b->roomCount; i++) {
@@ -101,6 +111,12 @@ void graphs_update(const Building *b, float dt)
     G.lastNight = b->nightTime;
 
     if (IsKeyPressed(KEY_TAB)) G.visible = !G.visible;
+
+    /* CLOSE button, top right of the dashboard */
+    if (G.visible && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Rectangle close = { (float)GetScreenWidth() - 90, 6, 78, 22 };
+        if (CheckCollisionPointRec(GetMousePosition(), close)) G.visible = false;
+    }
 
     /* motion trigger = a room going from quiet to motion */
     for (int i = 0; i < b->roomCount; i++) {
@@ -165,9 +181,14 @@ void graphs_draw(const Building *b)
     int W = GetScreenWidth();
     int H = GetScreenHeight();
     DrawRectangle(0, 0, W, H, Fade(BLACK, 0.9f));
-    DrawText("MONITORING DASHBOARD   (TAB to close - the night keeps running)", 12, 8, 16, RAYWHITE);
+    DrawText("MONITORING DASHBOARD   (TAB or CLOSE - the night keeps running)", 12, 8, 16, RAYWHITE);
 
-    const int cols = 3, rows = 2, gap = 8, top = 30;
+    Rectangle closeBtn = { (float)W - 90, 6, 78, 22 };
+    DrawRectangleRec(closeBtn, Fade(RED, 0.5f));
+    DrawRectangleLinesEx(closeBtn, 2, RED);
+    DrawText("CLOSE", (int)closeBtn.x + 14, (int)closeBtn.y + 4, 14, RAYWHITE);
+
+    const int cols = 3, rows = 2, gap = 8, top = 34;
     float cw = (W - gap * (cols + 1)) / (float)cols;
     float ch = (H - top - gap * (rows + 1)) / (float)rows;
     #define CELL(i) ((Rectangle){ gap + ((i) % cols) * (cw + gap), top + gap + ((i) / cols) * (ch + gap), cw, ch })
@@ -197,14 +218,14 @@ void graphs_draw(const Building *b)
     {   /* 4: ventilation */
         const float *s[1] = { G.vent };
         Color c[1] = { GREEN };
-        const char *nm[1] = { "rooms with HVAC running" };
+        const char *nm[1] = { "rooms with vent open" };
         plot(CELL(3), "4  VENTILATION (%)", "%", 0, 100, 1, s, c, nm);
     }
-    {   /* 5: open vs closed, measured */
+    {   /* 5: open vs sealed, measured */
         const float *s[2] = { G.tOpen, G.tClosed };
         Color c[2] = { SKYBLUE, ORANGE };
-        const char *nm[2] = { "HVAC on (avg)", "HVAC off (avg)" };
-        plot(CELL(4), "5  TEMP: VENT OPEN vs CLOSED", "", 15, 32, 2, s, c, nm);
+        const char *nm[2] = { "vent open (avg)", "vent sealed (avg)" };
+        plot(CELL(4), "5  TEMP: VENT OPEN vs SEALED", "", 15, 32, 2, s, c, nm);
     }
     {   /* spare cell: summary */
         Rectangle r = CELL(5);
