@@ -95,7 +95,10 @@ void  game_lose(Building *b);
 void room_set_lights(Room *r, bool on);
 void room_set_lock(Room *r, bool locked);
 void room_set_target_temp(Room *r, float temp);
+void room_set_hvac(Room *r, bool on);
 
+void ui_init(void);                 /* call once after InitWindow */
+void ui_close(void);                /* call once before CloseWindow */
 void ui_handle_input(Building *b);
 void ui_draw(const Building *b);
 

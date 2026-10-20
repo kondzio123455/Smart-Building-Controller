@@ -104,8 +104,10 @@ static void move_intruder(Building *b, int idx)
     int target = NEXT_HOP[in->room];
     if (target < 0) return;
 
-    /* the Crawler goes through the vents and can skip a room (and its locked door) */
-    if (in->type == INTRUDER_CRAWLER && NEXT_HOP[target] >= 0 && can_enter(b, NEXT_HOP[target])) {
+    /* the Crawler goes through the vents: it can skip a room (and its locked door),
+       but only if that room's vent is open (HVAC on) */
+    if (in->type == INTRUDER_CRAWLER && NEXT_HOP[target] >= 0
+        && b->rooms[target].actuators.hvacOn && can_enter(b, NEXT_HOP[target])) {
         target = NEXT_HOP[target];
     }
 
@@ -194,6 +196,15 @@ void building_update(Building *b, float dt)
         Room *r = &b->rooms[i];
         r->sensors.secondsSinceMotion += dt;
         r->sensors.motionDetected = (r->sensors.secondsSinceMotion < MOTION_SECONDS);
+
+        /* temperature: the HVAC pulls it to the target, otherwise the room slowly heats up */
+        float goal = r->actuators.hvacOn ? r->sensors.targetTemp : 30.0f;
+        float step = (r->actuators.hvacOn ? 0.08f : 0.03f) * dt;
+        float diff = goal - r->sensors.temperature;
+        if (diff > step)       r->sensors.temperature += step;
+        else if (diff < -step) r->sensors.temperature -= step;
+        else                   r->sensors.temperature = goal;
+
         room_evaluate_alert(r);
     }
 }
@@ -211,6 +222,11 @@ void room_set_lock(Room *r, bool locked)
 void room_set_target_temp(Room *r, float temp)
 {
     r->sensors.targetTemp = temp;
+}
+
+void room_set_hvac(Room *r, bool on)
+{
+    r->actuators.hvacOn = on;
 }
 
 int building_hour(const Building *b)
