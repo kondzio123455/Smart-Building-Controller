@@ -8,7 +8,6 @@
 #define POWER_DOOR_DRAIN   0.15f   /* for each locked door */
 #define POWER_LEECH_DRAIN  0.08f
 #define MOTION_SECONDS     4.0f
-#define AMBIENT_TEMP       30.0f   /* where a room drifts to with HVAC off */
 
 /*
  * Room layout (index order matters):
@@ -105,8 +104,10 @@ static void move_intruder(Building *b, int idx)
     int target = NEXT_HOP[in->room];
     if (target < 0) return;
 
-    /* the Crawler goes through the vents and can skip a room (and its locked door) */
-    if (in->type == INTRUDER_CRAWLER && NEXT_HOP[target] >= 0 && can_enter(b, NEXT_HOP[target])) {
+    /* the Crawler goes through the vents: it can skip a room (and its locked door),
+       but only if that room's vent is open (HVAC on) */
+    if (in->type == INTRUDER_CRAWLER && NEXT_HOP[target] >= 0
+        && b->rooms[target].actuators.hvacOn && can_enter(b, NEXT_HOP[target])) {
         target = NEXT_HOP[target];
     }
 
@@ -165,7 +166,6 @@ void building_update(Building *b, float dt)
             for (int i = 0; i < b->roomCount; i++) {
                 b->rooms[i].actuators.lightsOn   = false;
                 b->rooms[i].actuators.doorLocked = false;
-                b->rooms[i].actuators.hvacOn     = false;
             }
         }
     }
@@ -191,18 +191,20 @@ void building_update(Building *b, float dt)
         if (in->type == INTRUDER_GLITCH) b->rooms[in->room].actuators.lightsOn = false;
     }
 
-    /* rooms: temperature, motion sensors and alerts */
+    /* rooms: motion sensors and alerts */
     for (int i = 0; i < b->roomCount; i++) {
         Room *r = &b->rooms[i];
         r->sensors.secondsSinceMotion += dt;
         r->sensors.motionDetected = (r->sensors.secondsSinceMotion < MOTION_SECONDS);
 
-        /* temperature: HVAC pulls toward the setpoint, otherwise the room heats up */
-        if (r->actuators.hvacOn && !b->powerOut) {
-            r->sensors.temperature += (r->sensors.targetTemp - r->sensors.temperature) * 0.03f * dt;
-        } else {
-            r->sensors.temperature += (AMBIENT_TEMP - r->sensors.temperature) * 0.004f * dt;
-        }
+        /* temperature: the HVAC pulls it to the target, otherwise the room slowly heats up */
+        float goal = r->actuators.hvacOn ? r->sensors.targetTemp : 30.0f;
+        float step = (r->actuators.hvacOn ? 0.08f : 0.03f) * dt;
+        float diff = goal - r->sensors.temperature;
+        if (diff > step)       r->sensors.temperature += step;
+        else if (diff < -step) r->sensors.temperature -= step;
+        else                   r->sensors.temperature = goal;
+
         room_evaluate_alert(r);
     }
 }
@@ -222,6 +224,11 @@ void room_set_target_temp(Room *r, float temp)
     r->sensors.targetTemp = temp;
 }
 
+void room_set_hvac(Room *r, bool on)
+{
+    r->actuators.hvacOn = on;
+}
+
 int building_hour(const Building *b)
 {
     int hour = (int)(b->nightTime / SECONDS_PER_HOUR);
@@ -231,9 +238,4 @@ int building_hour(const Building *b)
 void game_lose(Building *b)
 {
     b->state = GAME_OVER;
-}
-
-void room_set_hvac(Room *r, bool on)
-{
-    r->actuators.hvacOn = on;
 }
