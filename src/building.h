@@ -9,7 +9,7 @@
 #define MAX_INTRUDERS     5
 #define INTRUDER_NAME_LEN 16
 #define MAX_SCENES        4
-#define MAX_RULES         6
+#define MAX_RULES         7
 #define MAX_LOG           256
 #define LOG_TEXT_LEN      72
 #define NOTICE_LEN        80
@@ -89,14 +89,15 @@ typedef enum {
     RULE_ECO,           /* power low: switch to the ECO scene */
     RULE_LIGHTS,        /* motion in a dark room: lights on */
     RULE_DOOR,          /* villain close to the Office: lock the Office door */
-    RULE_LEAK           /* water sensor wet: shut the main valve */
+    RULE_LEAK,          /* water sensor wet: shut the main valve */
+    RULE_SCHEDULE       /* night setback: thermostats to 18 C until 5 AM, then 21 C */
 } RuleId;
 
 /* Things that go wrong during the night (see building_start_event) */
 typedef enum {
     EVENT_SURGE,        /* a breaker trips: the room goes dead until you reset it */
     EVENT_LEAK,         /* a pipe bursts: floods a room and drains the water tank */
-    EVENT_HEATWAVE,     /* the HVAC struggles for a while */
+    EVENT_HEATWAVE,     /* an HVAC fault: the plant struggles for a while */
     EVENT_NETFAIL,      /* the internet drops: cloud automations stop */
     EVENT_FALSEALARM,   /* a smoke detector cries wolf */
     EVENT_DOORFAULT,    /* a door controller stops answering */
@@ -171,6 +172,7 @@ typedef struct {
     bool      powerOut;
     int       killer;       /* index of the intruder that got in, or -1 */
     float     energy;       /* kWh used tonight */
+    float     cost;         /* what it cost, in euro, at the tariff of the hour */
 
     float     integrity;    /* 100.0 down to 0.0: damage from fire */
     float     fireTimer;    /* seconds until the next random fire */
@@ -187,6 +189,7 @@ typedef struct {
     float     netSpeed;     /* Mbps right now */
 
     bool      ecoMode;
+    int       scheduleMode; /* 0 not applied yet, 1 night setback, 2 comfort */
     float     lockdownTimer;
     float     sceneCooldown[MAX_SCENES];
     bool      doorByRule;   /* the Office door was locked by RULE_DOOR */
@@ -212,6 +215,9 @@ void  room_evaluate_alert(Room *r);
 int   building_hour(const Building *b);
 float building_power_usage(const Building *b);   /* power lost per second */
 float room_load(const Building *b, int room);    /* how much of that one room uses */
+float building_outside_temp(const Building *b); /* the weather outside, degrees C */
+float building_tariff(const Building *b);       /* euro per kWh right now */
+const char *building_tariff_name(const Building *b);
 void  game_lose(Building *b);
 
 bool        building_start_fire(Building *b, int room);   /* returns false if it is already burning */
@@ -248,5 +254,6 @@ void ui_close(void);                /* call once before CloseWindow */
 void ui_handle_input(Building *b);
 void ui_draw(const Building *b);
 void ui_click_sound(void);          /* the panel uses this */
+bool ui_paused(void);               /* the game stands still while paused or while the help is open */
 
 #endif /* BUILDING_H */

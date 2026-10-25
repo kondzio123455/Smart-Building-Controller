@@ -6,6 +6,7 @@
 
 /* The control panel: everything that used to crowd the main screen lives here. */
 void panel_toggle(void);
+void panel_show_room(void);              /* open it on the ROOM tab */
 bool panel_visible(void);
 bool panel_contains(int x, int y);       /* is this screen point over the open panel? */
 void panel_update(Building *b);          /* every frame: key and mouse input */

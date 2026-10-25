@@ -12,7 +12,7 @@
 /* power lost per second */
 #define POWER_BASE_DRAIN   0.02f
 #define POWER_LIGHT_DRAIN  0.005f   /* each light that is on */
-#define POWER_VENT_DRAIN   0.003f   /* each open vent (more when the thermostat is set low) */
+#define POWER_VENT_DRAIN   0.0015f  /* each open vent; more the further the setting is from the weather outside */
 #define POWER_DOOR_DRAIN   0.15f    /* each locked door */
 #define POWER_PUMP_DRAIN   0.10f    /* the sprinkler pump, while any head is spraying */
 #define POWER_LEECH_DRAIN  0.08f
@@ -24,9 +24,8 @@
 /* temperature: an open vent pulls a room to its target, a sealed one lets it heat up */
 #define TEMP_RATE_OPEN     0.08f    /* degrees C per second */
 #define TEMP_RATE_SEALED   0.03f
-#define TEMP_SEALED_GOAL   30.0f
-#define HEATWAVE_SECONDS   70.0f
-#define HEATWAVE_BONUS     8.0f     /* sealed rooms head for 38 C, open vents work at half speed */
+#define HEATWAVE_SECONDS   70.0f    /* an HVAC fault */
+#define HEATWAVE_BONUS     8.0f     /* sealed rooms get 8 C hotter, open vents work at half speed */
 
 /* fire */
 #define FIRE_GROW          0.020f   /* base growth per second; it speeds up as the fire gets bigger */
@@ -82,10 +81,13 @@ static const int LINKS[LINK_COUNT][2] = { { 0, 1 }, { 1, 2 }, { 1, 3 }, { 2, 4 }
 
 #define SERVER_ROOM 4
 
+/* what a sealed room settles at: the Server Room is full of hot equipment, the Storage room has none */
+static const float SEALED_GOAL[MAX_ROOMS] = { 27.0f, 25.0f, 26.0f, 31.0f, 36.0f, 24.0f, 26.0f, 26.0f };
+
 static const char *SCENE_NAMES[MAX_SCENES] = { "LOCKDOWN", "ECO", "FIRE RESP", "RESET" };
 
 static const char *RULE_NAMES[MAX_RULES] = {
-    "AUTO-VENT", "AUTO-FIRE", "AUTO-ECO", "AUTO-LIGHTS", "AUTO-DOOR", "AUTO-LEAK"
+    "AUTO-VENT", "AUTO-FIRE", "AUTO-ECO", "AUTO-LIGHTS", "AUTO-DOOR", "AUTO-LEAK", "AUTO-SCHEDULE"
 };
 static const char *RULE_INFO[MAX_RULES] = {
     "Opens a room's vent when it passes 26 C",
@@ -93,13 +95,14 @@ static const char *RULE_INFO[MAX_RULES] = {
     "Switches to ECO when power drops below 25%",
     "Lights on when motion is seen in a dark room",
     "Locks the Office door while a villain is close",
-    "Shuts the main water valve when a leak is sensed"
+    "Shuts the main water valve when a leak is sensed",
+    "Night setback to 18 C until 5 AM, then comfort 21 C"
 };
 /* the cloud rules need the internet; the fire rule runs locally and always works */
-static const bool RULE_CLOUD[MAX_RULES] = { true, false, true, true, true, true };
+static const bool RULE_CLOUD[MAX_RULES] = { true, false, true, true, true, true, true };
 
 static const char *EVENT_NAMES[EVENT_COUNT] = {
-    "POWER SURGE", "BURST PIPE", "HEAT WAVE", "INTERNET DOWN", "FALSE ALARM", "DOOR FAULT"
+    "POWER SURGE", "BURST PIPE", "HVAC FAULT", "INTERNET DOWN", "FALSE ALARM", "DOOR FAULT"
 };
 
 const char *scene_name(SceneId id)
@@ -267,6 +270,7 @@ void building_init(Building *b)
     b->rules[RULE_FIRE].enabled = true;
     b->rules[RULE_ECO].enabled  = true;
     b->rules[RULE_LEAK].enabled = true;
+    b->rules[RULE_SCHEDULE].enabled = true;
 
     /*                          type               name       room hour  secs aggr */
     add_intruder(b, INTRUDER_DRIFTER, "Drifter", 4, 0, 15.0f, 6);
@@ -297,12 +301,33 @@ static bool controllable(const Room *r)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Weather and energy prices                                          */
+/* ------------------------------------------------------------------ */
+
+/* an Irish autumn night: about 9 C at midnight, falling to about 4 C by 6 AM */
+float building_outside_temp(const Building *b)
+{
+    return 9.0f - 0.9f * (b->nightTime / SECONDS_PER_HOUR);
+}
+
+/* cheap night rate until 5 AM, then the morning peak */
+float building_tariff(const Building *b)
+{
+    return (building_hour(b) < 5) ? 0.15f : 0.30f;
+}
+
+const char *building_tariff_name(const Building *b)
+{
+    return (building_hour(b) < 5) ? "NIGHT RATE" : "MORNING PEAK";
+}
+
+/* ------------------------------------------------------------------ */
 /*  Temperature                                                        */
 /* ------------------------------------------------------------------ */
 
-static float temp_step(float temp, float target, bool ventOpen, bool heatwave, float dt)
+static float temp_step(float temp, float target, float sealedGoal, bool ventOpen, bool heatwave, float dt)
 {
-    float goal = ventOpen ? target : TEMP_SEALED_GOAL + (heatwave ? HEATWAVE_BONUS : 0.0f);
+    float goal = ventOpen ? target : sealedGoal + (heatwave ? HEATWAVE_BONUS : 0.0f);
     float rate = ventOpen ? TEMP_RATE_OPEN : TEMP_RATE_SEALED;
     if (heatwave) rate *= ventOpen ? 0.5f : 2.0f;   /* the HVAC struggles, sealed rooms bake */
     float step = rate * dt;
@@ -403,9 +428,10 @@ float room_load(const Building *b, int room)
     float standby = 0.0f;
     if (r->actuators.lightsOn) standby += POWER_LIGHT_DRAIN;
     if (r->actuators.hvacOn) {
-        /* a low thermostat setting makes the HVAC work harder */
-        float cold = 24.0f - r->sensors.targetTemp;
-        standby += POWER_VENT_DRAIN * (1.0f + (cold > 0.0f ? cold / 4.0f : 0.0f));
+        /* the HVAC works harder the further the setting is from the weather outside */
+        float lift = r->sensors.targetTemp - building_outside_temp(b);
+        if (lift < 0.0f) lift = -lift;
+        standby += POWER_VENT_DRAIN * (1.0f + lift / 10.0f);
     }
     float load = standby * (b->ecoMode ? ECO_FACTOR : 1.0f);
     if (r->actuators.doorLocked && !r->contained) load += POWER_DOOR_DRAIN;   /* fire doors close on their own */
@@ -793,7 +819,7 @@ bool building_start_event(Building *b, EventId id)
         case EVENT_HEATWAVE:
             if (b->heatwave > 0.0f) return false;
             b->heatwave = HEATWAVE_SECONDS;
-            log_alert(b, "HEAT WAVE: the HVAC is struggling");
+            log_alert(b, "HVAC FAULT: the plant is struggling to keep up");
             return true;
 
         case EVENT_NETFAIL:
@@ -825,7 +851,7 @@ static void update_events(Building *b, float dt)
 {
     if (b->heatwave > 0.0f) {
         b->heatwave -= dt;
-        if (b->heatwave <= 0.0f) { b->heatwave = 0.0f; log_event(b, "The heat wave is over"); }
+        if (b->heatwave <= 0.0f) { b->heatwave = 0.0f; log_event(b, "The HVAC fault is cleared"); }
     }
     if (b->netOutage > 0.0f) {
         b->netOutage -= dt;
@@ -932,8 +958,9 @@ static void apply_eco(Building *b)
         Room *r = &b->rooms[i];
         if (!controllable(r)) continue;
         r->actuators.lightsOn = (i == GOAL_ROOM);
-        r->sensors.targetTemp = 24.0f;
+        r->sensors.targetTemp = 19.0f;
     }
+    b->scheduleMode = 0;
 }
 
 bool scene_activate(Building *b, SceneId id)
@@ -991,6 +1018,7 @@ bool scene_activate(Building *b, SceneId id)
                 if (!controllable(r)) continue;
                 r->actuators.lightsOn = true;
                 r->sensors.targetTemp = 21.0f;
+                b->scheduleMode = 0;
                 if (!r->contained) {
                     set_door(r, false);
                     r->actuators.hvacOn = true;
@@ -1124,6 +1152,21 @@ static void update_rules(Building *b)
         }
     }
 
+    /* AUTO-SCHEDULE: cheaper, quieter thermostats overnight, comfortable again before the morning peak */
+    if (b->rules[RULE_SCHEDULE].enabled && !b->ecoMode) {
+        int mode = (building_hour(b) < 5) ? 1 : 2;
+        if (mode != b->scheduleMode) {
+            b->scheduleMode = mode;
+            float target = (mode == 1) ? 18.0f : 21.0f;
+            for (int i = 0; i < b->roomCount; i++) {
+                if (controllable(&b->rooms[i]) && i != SERVER_ROOM) b->rooms[i].sensors.targetTemp = target;
+            }
+            b->rules[RULE_SCHEDULE].fired++;
+            log_event(b, mode == 1 ? "AUTO-SCHEDULE: night setback, thermostats to 18 C"
+                                   : "AUTO-SCHEDULE: comfort mode, thermostats to 21 C");
+        }
+    }
+
     /* AUTO-LEAK: a smart water shut-off */
     if (b->rules[RULE_LEAK].enabled && b->mainOpen) {
         for (int i = 0; i < b->roomCount; i++) {
@@ -1160,6 +1203,7 @@ void building_update(Building *b, float dt)
         float use = building_power_usage(b);
         b->power  -= use * dt;
         b->energy += use * dt * KWH_PER_POWER;
+        b->cost   += use * dt * KWH_PER_POWER * building_tariff(b);
         if (b->power <= 0.0f) {
             b->power = 0.0f;
             b->powerOut = true;
@@ -1206,7 +1250,7 @@ void building_update(Building *b, float dt)
         r->sensors.secondsSinceMotion += dt;
         r->sensors.motionDetected = !r->breakerTripped && (r->sensors.secondsSinceMotion < MOTION_SECONDS);
 
-        r->sensors.temperature = temp_step(r->sensors.temperature, r->sensors.targetTemp,
+        r->sensors.temperature = temp_step(r->sensors.temperature, r->sensors.targetTemp, SEALED_GOAL[i],
                                            r->actuators.hvacOn, hot, dt);
         room_evaluate_alert(r);
     }
@@ -1297,7 +1341,7 @@ const char *building_advice(const Building *b)
         }
     }
     if (b->netOutage > 0.0f) return "Internet is down: the cloud automations are paused";
-    if (b->heatwave > 0.0f)  return "Heat wave: keep the vents open";
+    if (b->heatwave > 0.0f)  return "HVAC fault: keep the vents open";
 
     float left  = building_power_left(b);
     float night = NIGHT_HOURS * SECONDS_PER_HOUR - b->nightTime;

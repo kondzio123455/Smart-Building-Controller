@@ -19,6 +19,7 @@ static bool open = false;
 static int  tab  = TAB_ROOM;
 
 void panel_toggle(void) { open = !open; }
+void panel_show_room(void) { open = true; tab = TAB_ROOM; }
 bool panel_visible(void) { return open; }
 
 bool panel_contains(int x, int y)
@@ -89,7 +90,7 @@ static Rectangle temp_minus(void) { return (Rectangle){ CX + 190, CY + 138, 30, 
 static Rectangle temp_plus(void)  { return (Rectangle){ CX + 280, CY + 138, 30, 26 }; }
 
 static Rectangle scene_row(int i) { return (Rectangle){ CX, CY + i * 62.0f, 368, 56 }; }
-static Rectangle rule_row(int i)  { return (Rectangle){ CX, CY + i * 44.0f, 368, 40 }; }
+static Rectangle rule_row(int i)  { return (Rectangle){ CX, CY + i * 38.0f, 368, 34 }; }
 static Rectangle valve_btn(void)  { return (Rectangle){ CX + 238, CY + 36, 130, 26 }; }
 static Rectangle breaker_btn(int i) { return (Rectangle){ CX + i * 62.0f, CY + 132, 56, 30 }; }
 
@@ -261,12 +262,12 @@ static void draw_auto_tab(const Building *b)
         bool offline = cloud && b->netOutage > 0.0f;
         DrawRectangleRec(r, Fade(on ? GREEN : GRAY, 0.14f));
         DrawRectangleLinesEx(r, 1, hit(r) ? RAYWHITE : (on ? GREEN : GRAY));
-        DrawText(rule_name((RuleId)i), (int)r.x + 8, (int)r.y + 5, 13, RAYWHITE);
-        DrawText(rule_info((RuleId)i), (int)r.x + 8, (int)r.y + 24, 9, GRAY);
-        DrawText(on ? "ON" : "OFF", (int)(r.x + r.width) - 34, (int)r.y + 5, 14, on ? GREEN : RED);
-        DrawText(offline ? "OFFLINE" : (cloud ? "CLOUD" : "LOCAL"), (int)(r.x + r.width) - 90, (int)r.y + 7, 10,
+        DrawText(rule_name((RuleId)i), (int)r.x + 8, (int)r.y + 3, 12, RAYWHITE);
+        DrawText(rule_info((RuleId)i), (int)r.x + 8, (int)r.y + 20, 9, GRAY);
+        DrawText(on ? "ON" : "OFF", (int)(r.x + r.width) - 34, (int)r.y + 3, 13, on ? GREEN : RED);
+        DrawText(offline ? "OFFLINE" : (cloud ? "CLOUD" : "LOCAL"), (int)(r.x + r.width) - 96, (int)r.y + 5, 10,
                  offline ? ORANGE : (cloud ? SKYBLUE : GREEN));
-        DrawText(TextFormat("x%d", b->rules[i].fired), (int)(r.x + r.width) - 34, (int)r.y + 24, 10, GRAY);
+        DrawText(TextFormat("x%d", b->rules[i].fired), (int)(r.x + r.width) - 34, (int)r.y + 20, 10, GRAY);
     }
 }
 
@@ -292,12 +293,14 @@ static void draw_util_tab(const Building *b)
 
     /* network */
     DrawText("NETWORK", CX, CY + 82, 12, RAYWHITE);
+    DrawText(TextFormat("outside %.0f C   %s %.2f EUR/kWh", building_outside_temp(b), building_tariff_name(b), building_tariff(b)),
+             CX, CY + 98, 10, GRAY);
     draw_bar((Rectangle){ CX + 70, CY + 84, 150, 10 }, b->netSpeed / 100.0f, (b->netSpeed > 30.0f) ? GREEN : RED);
     DrawText(b->netOutage > 0.0f ? "INTERNET DOWN" : TextFormat("%.0f Mbps", b->netSpeed), CX + 230, CY + 82, 12,
              b->netOutage > 0.0f ? ORANGE : RAYWHITE);
 
     /* breakers */
-    DrawText("CIRCUIT BREAKERS (click to cut or reset)", CX, CY + 112, 10, GRAY);
+    DrawText("CIRCUIT BREAKERS (click to cut or reset)", CX, CY + 114, 10, GRAY);
     for (int i = 0; i < b->roomCount; i++) {
         Rectangle r = breaker_btn(i);
         bool tripped = b->rooms[i].breakerTripped;
