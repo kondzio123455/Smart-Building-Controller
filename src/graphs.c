@@ -63,14 +63,8 @@ static void reset(void)
 
 static void take_sample(const Building *b)
 {
-    /* network: simulated. Random walk, halved while the Glitch is awake, dead without power */
-    G.netNow += (GetRandomValue(-100, 100) / 100.0f) * 8.0f;
-    G.netNow  = clampf(G.netNow, 15.0f, 100.0f);
-    float net = G.netNow;
-    for (int i = 0; i < b->intruderCount; i++) {
-        if (b->intruders[i].active && b->intruders[i].type == INTRUDER_GLITCH) net *= 0.5f;
-    }
-    if (b->powerOut) net = 0.0f;
+    /* network: the speed the simulation reports (it drops during an internet failure, a dead Server Room, a Glitch...) */
+    float net = b->netSpeed;
 
     /* temperatures, plus open/sealed averages */
     float sumOn = 0.0f, sumOff = 0.0f, all = 0.0f;
@@ -203,7 +197,7 @@ void graphs_draw(const Building *b)
         const float *s[MAX_ROOMS];
         Color c[MAX_ROOMS];
         const char *nm[MAX_ROOMS];
-        static const Color pal[MAX_ROOMS] = { RAYWHITE, ORANGE, YELLOW, LIME, SKYBLUE, PINK, MAGENTA, GOLD };
+        const Color pal[MAX_ROOMS] = { RAYWHITE, ORANGE, YELLOW, LIME, SKYBLUE, PINK, MAGENTA, GOLD };
         static const char *short_nm[MAX_ROOMS] = { "Off", "Hall", "Lob", "Kit", "Srv", "Sto", "-", "-" };
         int k = b->roomCount;
         for (int i = 0; i < k; i++) { s[i] = G.roomTemp[i]; c[i] = pal[i]; nm[i] = short_nm[i]; }
@@ -238,7 +232,11 @@ void graphs_draw(const Building *b)
                  (int)r.x + 10, (int)r.y + 30, 14, b->powerOut ? RED : RAYWHITE);
         DrawText(TextFormat("Rooms:  %d", b->roomCount), (int)r.x + 10, (int)r.y + 52, 14, RAYWHITE);
         DrawText(TextFormat("Motion now:  %d room(s)", hot), (int)r.x + 10, (int)r.y + 74, 14, RAYWHITE);
-        DrawText(TextFormat("Samples:  %d / %d", G.n, HIST), (int)r.x + 10, (int)r.y + 96, 14, GRAY);
+        DrawText(TextFormat("Integrity:  %.0f%%", b->integrity), (int)r.x + 10, (int)r.y + 96, 14,
+                 (b->integrity > 60.0f) ? RAYWHITE : (b->integrity > 30.0f) ? ORANGE : RED);
+        DrawText(TextFormat("Fires tonight:  %d", b->fireCount), (int)r.x + 10, (int)r.y + 118, 14,
+                 (b->fireCount > 0) ? ORANGE : RAYWHITE);
+        DrawText(TextFormat("Samples:  %d / %d", G.n, HIST), (int)r.x + 10, (int)r.y + 140, 14, GRAY);
     }
     #undef CELL
 }

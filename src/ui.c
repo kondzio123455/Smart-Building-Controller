@@ -1,15 +1,17 @@
 #include <math.h>
+#include <string.h>
 #include "raylib.h"
 #include "building.h"
 #include "graphs.h"
+#include "panel.h"
 
 /* Must match the window size in main.c */
 #define SCREEN_W 800
 #define SCREEN_H 450
 
 #define MARGIN   20
-#define BTN_H    36
-#define BTN_Y    (SCREEN_H - 62)
+#define BTN_H    28
+#define BTN_Y    (SCREEN_H - 50)
 
 /* camera map: a 3 x 2 grid of buttons in the bottom right */
 #define MAP_COLS 3
@@ -51,7 +53,8 @@ static const RoomLook LOOKS[MAX_ROOMS] = {
 /* ------------------------------------------------------------------ */
 
 enum { SFX_HUM, SFX_CLICK, SFX_THUMP, SFX_SQUEAK, SFX_DING,
-       SFX_SCREECH, SFX_BEAT, SFX_STATIC, SFX_COUNT };
+       SFX_SCREECH, SFX_BEAT, SFX_STATIC, SFX_ALARM, SFX_HISS,
+       SFX_STEP, SFX_BANG, SFX_BOOM, SFX_ZAP, SFX_WHISPER, SFX_COUNT };
 
 static Sound sfx[SFX_COUNT];
 static bool  audioOk = false;
@@ -99,6 +102,27 @@ static Sound synth(int kind, float seconds)
                 s = sinf(2 * PI * 55 * t) * (expf(-t * 22.0f)
                   + (t > 0.22f ? 0.7f * expf(-(t - 0.22f) * 22.0f) : 0.0f));
                 break;
+            case SFX_ALARM:   /* two harsh beeps a second */
+                s = (fmodf(t, 0.5f) < 0.25f) ? ((sinf(2 * PI * 880 * t) > 0.0f) ? 0.5f : -0.5f) : 0.0f;
+                break;
+            case SFX_HISS:    /* water spraying */
+                s = noise * 0.18f;
+                break;
+            case SFX_STEP:    /* a heavy footstep */
+                s = sinf(2 * PI * (90.0f - 50.0f * t) * t) * expf(-t * 18.0f) + 0.15f * noise * expf(-t * 60.0f);
+                break;
+            case SFX_BANG:    /* a fist on a steel door */
+                s = sinf(2 * PI * (110.0f - 60.0f * t) * t) * expf(-t * 7.0f) + 0.6f * noise * expf(-t * 25.0f);
+                break;
+            case SFX_BOOM:    /* flashover or backdraft */
+                s = (0.9f * sinf(2 * PI * (60.0f - 30.0f * t) * t) + 0.7f * noise) * expf(-t * 3.5f);
+                break;
+            case SFX_ZAP:     /* a breaker tripping */
+                s = (0.7f * noise + 0.5f * sinf(2 * PI * (2000.0f - 1500.0f * t) * t)) * expf(-t * 9.0f);
+                break;
+            case SFX_WHISPER: /* breathy noise, swelling and fading */
+                s = noise * 0.25f * (0.5f + 0.5f * sinf(2 * PI * 3.0f * t)) * sinf(PI * t / seconds);
+                break;
             default: /* static burst */
                 s = noise * 0.5f * (1.0f - t / seconds);
                 break;
@@ -120,11 +144,17 @@ void ui_init(void)
     audioOk = IsAudioDeviceReady();
     if (!audioOk) return;
 
-    const float secs[SFX_COUNT] = { 2.0f, 0.06f, 0.4f, 0.15f, 0.9f, 1.5f, 0.7f, 0.25f };
+    const float secs[SFX_COUNT] = { 2.0f, 0.06f, 0.4f, 0.15f, 0.9f, 1.5f, 0.7f, 0.25f, 1.0f, 1.0f, 0.3f, 0.5f, 1.2f, 0.4f, 1.5f };
     for (int i = 0; i < SFX_COUNT; i++) sfx[i] = synth(i, secs[i]);
 
     SetSoundVolume(sfx[SFX_HUM], 0.35f);
     SetSoundVolume(sfx[SFX_BEAT], 0.9f);
+    SetSoundVolume(sfx[SFX_ALARM], 0.5f);
+    SetSoundVolume(sfx[SFX_HISS], 0.4f);
+    SetSoundVolume(sfx[SFX_BANG], 0.9f);
+    SetSoundVolume(sfx[SFX_BOOM], 1.0f);
+    SetSoundVolume(sfx[SFX_ZAP], 0.7f);
+    SetSoundVolume(sfx[SFX_WHISPER], 0.5f);
 }
 
 void ui_close(void)
@@ -141,7 +171,7 @@ void ui_close(void)
 
 typedef enum {
     HS_DOOR, HS_LAMP, HS_VENT, HS_FAN, HS_DUCK, HS_LOCKER,
-    HS_TV, HS_BELL, HS_FRIDGE, HS_RACK, HS_LANTERN
+    HS_TV, HS_BELL, HS_FRIDGE, HS_RACK, HS_LANTERN, HS_SPRINKLER
 } HotspotKind;
 
 typedef struct {
@@ -158,6 +188,8 @@ static float doorClosed[MAX_ROOMS];
 static float switchFlash = 0.0f, beatTimer = 0.0f;
 static float scareTime = -1.0f;
 static bool  scareDone = false;
+static float shake = 0.0f, boomFlash = 0.0f, stare = 0.0f, whisperTimer = 0.0f;
+static float dwell[MAX_INTRUDERS];   /* seconds each villain has been in the room you watch */
 
 static BoundingBox box_at(float x, float y, float z, float w, float h, float d)
 {
@@ -177,10 +209,11 @@ static int build_hotspots(int roomId, Hotspot *out)
 {
     int n = 0;
 
-    /* every room has these three */
+    /* every room has these four */
     n = add_hs(out, n, HS_DOOR, 0, box_at(2.5f, 1.1f, -3.85f, 1.6f, 2.2f, 0.3f));
     n = add_hs(out, n, HS_LAMP, 0, box_at(0.0f, 3.1f, 0.0f, 0.8f, 0.8f, 0.8f));
     n = add_hs(out, n, HS_VENT, 0, box_at(-2.5f, 2.7f, -3.85f, 2.0f, 0.5f, 0.3f));
+    n = add_hs(out, n, HS_SPRINKLER, 0, box_at(1.0f, 2.8f, -3.55f, 0.6f, 0.6f, 0.9f));
 
     switch (roomId) {
         case 0:
@@ -257,29 +290,27 @@ static Rectangle button_rect(int i)
     };
 }
 
-static Rectangle light_btn_rect(void)
+/* the only two buttons on the main screen: everything else is in the control panel */
+static Rectangle control_btn_rect(void)
 {
-    return (Rectangle){ MARGIN, BTN_Y, 100, BTN_H };
-}
-
-static Rectangle door_btn_rect(void)
-{
-    return (Rectangle){ MARGIN + 110, BTN_Y, 110, BTN_H };
+    return (Rectangle){ MARGIN, BTN_Y, 120, BTN_H };
 }
 
 static Rectangle graph_btn_rect(void)
 {
-    return (Rectangle){ MARGIN + 230, BTN_Y, 100, BTN_H };
+    return (Rectangle){ MARGIN + 128, BTN_Y, 100, BTN_H };
 }
+
+static const int SCENE_KEY[MAX_SCENES] = { KEY_Z, KEY_X, KEY_C, KEY_V };
 
 static bool on_hud(const Building *b, Vector2 m)
 {
     for (int i = 0; i < b->roomCount; i++) {
         if (CheckCollisionPointRec(m, button_rect(i))) return true;
     }
-    return CheckCollisionPointRec(m, light_btn_rect())
-        || CheckCollisionPointRec(m, door_btn_rect())
-        || CheckCollisionPointRec(m, graph_btn_rect());
+    return CheckCollisionPointRec(m, control_btn_rect())
+        || CheckCollisionPointRec(m, graph_btn_rect())
+        || panel_contains((int)m.x, (int)m.y);
 }
 
 static Color alert_colour(AlertLevel a)
@@ -315,23 +346,88 @@ static void select_room(Building *b, int i)
     play(SFX_STATIC);
 }
 
+void ui_click_sound(void)
+{
+    play(SFX_CLICK);
+}
+
+/* manual controls. Each one changes the room through the control API and writes to the event log */
+static bool power_ok(const Building *b)
+{
+    if (b->powerOut) play(SFX_CLICK);   /* the controls are dead */
+    return !b->powerOut;
+}
+
+/* a room's controls need power, a working breaker and a room that still exists */
+static bool room_responds(Building *b, const Room *room, bool isDoor)
+{
+    if (!power_ok(b)) return false;
+    if (room->burnt) { play(SFX_CLICK); return false; }
+    if (room->breakerTripped) {
+        log_event(b, "%s has no power", room->name);
+        play(SFX_CLICK);
+        return false;
+    }
+    if (isDoor && room->lockFault > 0.0f) {
+        log_event(b, "%s door controller is not responding", room->name);
+        play(SFX_CLICK);
+        return false;
+    }
+    return true;
+}
+
+static void toggle_lights(Building *b, Room *room)
+{
+    if (!room_responds(b, room, false)) return;
+    room_set_lights(room, !room->actuators.lightsOn);
+    log_event(b, "%s lights %s", room->name, room->actuators.lightsOn ? "on" : "off");
+    play(SFX_CLICK);
+}
+
+static void toggle_door(Building *b, Room *room)
+{
+    if (!room_responds(b, room, true)) return;
+    room_set_lock(room, !room->actuators.doorLocked);
+    log_event(b, "%s door %s", room->name, room->actuators.doorLocked ? "locked" : "unlocked");
+    play(SFX_THUMP);
+}
+
+static void toggle_vent(Building *b, Room *room)
+{
+    if (!room_responds(b, room, false)) return;
+    room_set_hvac(room, !room->actuators.hvacOn);
+    log_event(b, "%s vent %s", room->name, room->actuators.hvacOn ? "opened" : "sealed");
+    play(SFX_THUMP);
+}
+
+static void toggle_sprinklers(Building *b, Room *room)
+{
+    if (!room_responds(b, room, false)) return;
+    room_set_sprinklers(room, !room->actuators.sprinklers);
+    log_event(b, "%s sprinkler valve %s", room->name, room->actuators.sprinklers ? "opened" : "closed");
+    if (room->actuators.sprinklers && room->fire > 0.0f && room->fireKind == FIRE_GREASE) {
+        log_alert(b, "WARNING: water on a grease fire makes it worse!");
+    }
+    if (room->actuators.sprinklers && room->fireKind == FIRE_ELECTRICAL) {
+        log_alert(b, "WARNING: water near live circuits shorts them out");
+    }
+    play(SFX_CLICK);
+}
+
+static void run_scene(Building *b, SceneId id)
+{
+    play(scene_activate(b, id) ? SFX_THUMP : SFX_CLICK);
+}
+
 static void click_hotspot(Building *b, const Hotspot *h)
 {
     Room *room = &b->rooms[b->selectedRoom];
 
     switch (h->kind) {
-        case HS_DOOR:
-            if (!b->powerOut) room_set_lock(room, !room->actuators.doorLocked);
-            play(SFX_THUMP);
-            break;
-        case HS_LAMP:
-            if (!b->powerOut) room_set_lights(room, !room->actuators.lightsOn);
-            play(SFX_CLICK);
-            break;
-        case HS_VENT:
-            if (!b->powerOut) room_set_hvac(room, !room->actuators.hvacOn);
-            play(SFX_THUMP);
-            break;
+        case HS_DOOR:      toggle_door(b, room);       break;
+        case HS_LAMP:      toggle_lights(b, room);     break;
+        case HS_VENT:      toggle_vent(b, room);       break;
+        case HS_SPRINKLER: toggle_sprinklers(b, room); break;
         case HS_FAN:     fanOn = !fanOn;                          play(SFX_CLICK);  break;
         case HS_DUCK:    duckBounce = 1.0f;                       play(SFX_SQUEAK); break;
         case HS_LOCKER:  lockerOpen[h->index] = !lockerOpen[h->index]; play(SFX_THUMP); break;
@@ -350,33 +446,40 @@ void ui_handle_input(Building *b)
         return;
     }
 
+    /* the control panel (SPACE) handles its own keys and clicks */
+    if (!graphs_visible()) panel_update(b);
+
+    Vector2 mouse = GetMousePosition();
+
     /* keys 1-6 switch camera */
     for (int i = 0; i < b->roomCount; i++) {
         if (IsKeyPressed(KEY_ONE + i)) select_room(b, i);
     }
 
-    /* while the dashboard is open, the game ignores the mouse */
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !graphs_visible()) {
-        Vector2 mouse = GetMousePosition();
+    /* scenes: Z lockdown, X eco, C fire response, V reset */
+    for (int i = 0; i < MAX_SCENES; i++) {
+        if (IsKeyPressed(SCENE_KEY[i])) run_scene(b, (SceneId)i);
+    }
+
+    /* shortcuts for the room you are viewing */
+    {
+        Room *room = &b->rooms[b->selectedRoom];
+        if (IsKeyPressed(KEY_L)) toggle_lights(b, room);
+        if (IsKeyPressed(KEY_D)) toggle_door(b, room);
+        if (IsKeyPressed(KEY_S)) toggle_sprinklers(b, room);
+    }
+
+    /* while the dashboard is open, or the mouse is on the panel, the room ignores the mouse */
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !graphs_visible()
+        && !panel_contains((int)mouse.x, (int)mouse.y)) {
 
         if (on_hud(b, mouse)) {
             for (int i = 0; i < b->roomCount; i++) {
                 if (CheckCollisionPointRec(mouse, button_rect(i))) select_room(b, i);
             }
-            if (CheckCollisionPointRec(mouse, graph_btn_rect())) graphs_toggle();
-
-            Room *room = &b->rooms[b->selectedRoom];
-            if (!b->powerOut) {
-                if (CheckCollisionPointRec(mouse, light_btn_rect())) {
-                    room_set_lights(room, !room->actuators.lightsOn);
-                    play(SFX_CLICK);
-                }
-                if (CheckCollisionPointRec(mouse, door_btn_rect())) {
-                    room_set_lock(room, !room->actuators.doorLocked);
-                    play(SFX_THUMP);
-                }
-            }
-        } else {
+            if (CheckCollisionPointRec(mouse, control_btn_rect())) { panel_toggle(); play(SFX_CLICK); }
+            if (CheckCollisionPointRec(mouse, graph_btn_rect()))   graphs_toggle();
+        } else if (!b->rooms[b->selectedRoom].burnt) {
             /* click on something in the room itself */
             Room *room = &b->rooms[b->selectedRoom];
             Hotspot hs[MAX_HOTSPOTS];
@@ -387,14 +490,9 @@ void ui_handle_input(Building *b)
         }
     }
 
-    /* keyboard shortcuts for the selected room */
-    if (!b->powerOut) {
-        Room *room = &b->rooms[b->selectedRoom];
-        if (IsKeyPressed(KEY_L)) { room_set_lights(room, !room->actuators.lightsOn); play(SFX_CLICK); }
-        if (IsKeyPressed(KEY_D)) { room_set_lock(room, !room->actuators.doorLocked);  play(SFX_THUMP); }
-    }
-
-    /* TEMPORARY test key */
+    /* TEMPORARY test keys: F starts a fire here, E a random event, K ends the night */
+    if (IsKeyPressed(KEY_F)) building_start_fire(b, b->selectedRoom);
+    if (IsKeyPressed(KEY_E)) building_start_event(b, (EventId)GetRandomValue(0, EVENT_COUNT - 1));
     if (IsKeyPressed(KEY_K)) game_lose(b);
 }
 
@@ -415,6 +513,8 @@ static void update_anim(const Building *b, float dt)
     if (fanOn) fanAngle += dt * 14.0f;
     if (duckBounce > 0.0f) duckBounce -= dt * 2.5f;
     if (switchFlash > 0.0f) switchFlash -= dt;
+    if (shake > 0.0f)       shake -= dt * 1.5f;
+    if (boomFlash > 0.0f)   boomFlash -= dt;
 }
 
 /* ------------------------------------------------------------------ */
@@ -645,64 +745,246 @@ static void draw_props(int id, float t, float k)
 /*  Intruders: each kind has its own shape and idle animation          */
 /* ------------------------------------------------------------------ */
 
-static void draw_intruder(const Intruder *in, int slot, float t, float k)
+static Vector3 v3(float x, float y, float z)
 {
-    float x = -2.2f + slot * 1.2f;
-    float z = 0.8f;
+    return (Vector3){ x, y, z };
+}
+
+/* a tapered tube between two points: arms, legs, tentacles */
+static void limb(Vector3 a, Vector3 b, float r0, float r1, Color c)
+{
+    DrawCylinderEx(a, b, r0, r1, 6, c);
+}
+
+/* a very cheap sphere, for droplets and sparks */
+static void speck(Vector3 p, float r, Color c)
+{
+    DrawSphereEx(p, r, 4, 4, c);
+}
+
+/* which way a creature turns to look straight at the camera */
+typedef struct {
+    Vector3 face;   /* from the creature toward the camera */
+    Vector3 side;   /* to its left, as the camera sees it */
+} Facing;
+
+static Facing facing_to(Vector3 cam, float x, float z)
+{
+    float dx = cam.x - x;
+    float dz = cam.z - z;
+    float len = sqrtf(dx * dx + dz * dz);
+    if (len < 0.001f) len = 1.0f;
+
+    Facing f;
+    f.face = v3(dx / len, 0.0f, dz / len);
+    f.side = v3(-dz / len, 0.0f, dx / len);
+    return f;
+}
+
+static Vector3 eye_at(Vector3 head, Facing f, float forward, float sideways, float up)
+{
+    return v3(head.x + f.face.x * forward + f.side.x * sideways,
+              head.y + up,
+              head.z + f.face.z * forward + f.side.z * sideways);
+}
+
+static void draw_shadow(float x, float z, float r)
+{
+    DrawCylinder(v3(x, 0.014f, z), r, r, 0.004f, 14, Fade(BLACK, 0.55f));
+}
+
+/* THE DRIFTER: a hunched figure whose arms hang below its knees, with a jaw that never quite closes */
+static void draw_walker(float x, float z, float t, int slot, float dim, Facing f)
+{
+    float ph      = t * 1.4f + slot;
+    float sway    = sinf(ph) * 0.06f;
+    float stride  = sinf(ph * 1.7f) * 0.14f;
+    float breathe = sinf(t * 2.2f + slot) * 0.02f;
+    Color cloth = shade((Color){ 36, 34, 38, 255 }, dim);
+    Color skin  = shade((Color){ 150, 148, 140, 255 }, dim);
+    Color dark  = shade((Color){ 18, 18, 20, 255 }, dim);
+
+    limb(v3(x - 0.16f + sway, 0.95f, z), v3(x - 0.18f, 0.0f, z + stride), 0.11f, 0.07f, dark);
+    limb(v3(x + 0.16f + sway, 0.95f, z), v3(x + 0.18f, 0.0f, z - stride), 0.11f, 0.07f, dark);
+
+    Vector3 chest = v3(x + sway * 1.5f, 1.72f + breathe, z - 0.12f);
+    limb(v3(x + sway, 0.95f, z), chest, 0.26f, 0.20f, cloth);
+
+    /* arms far too long, with claws */
+    float swing = sinf(ph * 1.7f) * 0.1f;
+    for (int s = -1; s <= 1; s += 2) {
+        Vector3 sh = v3(chest.x + s * 0.30f, 1.62f, chest.z);
+        Vector3 el = v3(sh.x + s * 0.08f, 1.05f, z + 0.05f + swing * s);
+        Vector3 ha = v3(sh.x + s * 0.06f, 0.32f, z + 0.12f + swing * 1.6f * s);
+        limb(sh, el, 0.07f, 0.05f, skin);
+        limb(el, ha, 0.05f, 0.035f, skin);
+        for (int c = 0; c < 3; c++) {
+            limb(ha, v3(ha.x + (c - 1) * 0.06f, ha.y - 0.24f, ha.z + 0.05f), 0.02f, 0.004f, skin);
+        }
+    }
+
+    /* neck, tilted head, a long jaw */
+    Vector3 neck = v3(chest.x, chest.y + 0.12f, chest.z);
+    float tilt = sinf(t * 0.7f + slot) * 0.12f;
+    Vector3 head = v3(neck.x + tilt, neck.y + 0.30f, neck.z + 0.14f);
+    limb(neck, head, 0.07f, 0.06f, skin);
+    DrawSphere(head, 0.20f, skin);
+    DrawSphere(v3(head.x, head.y - 0.13f, head.z + 0.02f), 0.14f, skin);
+
+    /* eyes that flicker and follow the camera */
+    if (GetRandomValue(0, 40) != 0) {
+        DrawSphere(eye_at(head, f, 0.17f, -0.08f, 0.03f), 0.045f, RAYWHITE);
+        DrawSphere(eye_at(head, f, 0.17f,  0.08f, 0.03f), 0.045f, RAYWHITE);
+    }
+    /* the mouth opens and closes, full of little teeth */
+    float jaw = 0.5f + 0.5f * sinf(t * 3.0f + slot);
+    Vector3 m = eye_at(head, f, 0.16f, 0.0f, -0.12f - jaw * 0.04f);
+    DrawSphere(m, 0.05f + jaw * 0.03f, BLACK);
+    for (int k = -2; k <= 2; k++) {
+        speck(eye_at(head, f, 0.18f, k * 0.03f, -0.10f), 0.014f, RAYWHITE);
+    }
+    draw_shadow(x, z, 0.5f);
+}
+
+/* THE SHADE: tall, hooded, hovering, with tendrils along the floor and red eyes that never blink */
+static void draw_shade(float x, float z, float t, int slot, Facing f)
+{
+    Color black = (Color){ 8, 8, 12, 255 };
+    float fy = 0.15f + sinf(t * 1.6f + slot) * 0.08f;
+
+    limb(v3(x, fy, z), v3(x, fy + 2.1f, z), 0.38f, 0.14f, black);          /* the robe */
+    Vector3 head = v3(x + sinf(t * 0.8f) * 0.05f, fy + 2.35f, z + 0.05f);
+    DrawSphere(head, 0.20f, black);
+    DrawCylinder(v3(head.x, head.y - 0.22f, head.z - 0.02f), 0.0f, 0.30f, 0.55f, 8, black);   /* the hood */
+
+    for (int s = -1; s <= 1; s += 2) {                                      /* arms to the floor */
+        Vector3 sh   = v3(x + s * 0.20f, fy + 1.9f, z);
+        Vector3 hand = v3(x + s * (0.42f + sinf(t * 1.3f + s) * 0.04f), 0.05f, z + 0.15f + sinf(t * 0.9f) * 0.05f);
+        limb(sh, hand, 0.06f, 0.03f, black);
+        for (int c = 0; c < 4; c++) {
+            limb(hand, v3(hand.x + (c - 1.5f) * 0.04f, 0.0f, hand.z + 0.25f), 0.012f, 0.003f, black);
+        }
+    }
+    for (int i = 0; i < 6; i++) {                                           /* tendrils of shadow */
+        float a = i * 1.047f + t * 0.5f;
+        float reach = 0.6f + 0.2f * sinf(t * 2.0f + i);
+        limb(v3(x, fy + 0.2f, z), v3(x + cosf(a) * reach, 0.05f, z + sinf(a) * reach), 0.04f, 0.005f, black);
+    }
+
+    Vector3 e1 = eye_at(head, f, 0.17f, -0.08f, 0.02f);
+    Vector3 e2 = eye_at(head, f, 0.17f,  0.08f, 0.02f);
+    DrawSphere(e1, 0.035f, RED);
+    DrawSphere(e2, 0.035f, RED);
+    DrawSphere(e1, 0.07f, Fade(RED, 0.20f));     /* a faint glow */
+    DrawSphere(e2, 0.07f, Fade(RED, 0.20f));
+    draw_shadow(x, z, 0.7f);
+}
+
+/* THE CRAWLER: six jointed legs that skitter, a cluster of orange eyes, mandibles */
+static void draw_crawler(float x, float z, float t, int slot, float dim, Facing f)
+{
+    Color body = shade((Color){ 28, 24, 20, 255 }, dim);
+    Color bone = shade((Color){ 190, 180, 160, 255 }, dim);
+    float bob = sinf(t * 9.0f + slot) * 0.02f;
+    Vector3 c = v3(x, 0.42f + bob, z);
+
+    DrawSphere(c, 0.32f, body);
+    Vector3 head = v3(c.x + f.face.x * 0.32f, c.y + 0.04f, c.z + f.face.z * 0.32f);
+    DrawSphere(head, 0.20f, body);
+
+    for (int i = 0; i < 6; i++) {
+        float side  = (i % 2) ? 1.0f : -1.0f;
+        float row   = (float)(i / 2 - 1) * 0.28f;
+        float phase = t * 11.0f + i * 1.7f;
+        Vector3 hip  = v3(c.x + side * 0.22f, c.y, c.z + row);
+        Vector3 knee = v3(hip.x + side * 0.55f, c.y + 0.35f + sinf(phase) * 0.06f, hip.z + row * 0.3f);
+        Vector3 foot = v3(hip.x + side * 0.95f + sinf(phase) * 0.05f, 0.0f, hip.z + row * 0.8f + cosf(phase) * 0.12f);
+        limb(hip, knee, 0.035f, 0.03f, body);
+        limb(knee, foot, 0.03f, 0.008f, body);
+    }
+    for (int e = 0; e < 4; e++) {
+        DrawSphere(eye_at(head, f, 0.17f, (e - 1.5f) * 0.06f, 0.04f + (e % 2) * 0.05f), 0.025f, ORANGE);
+    }
+    limb(eye_at(head, f, 0.14f, -0.06f, -0.04f), eye_at(head, f, 0.30f, -0.02f, -0.14f), 0.025f, 0.004f, bone);
+    limb(eye_at(head, f, 0.14f,  0.06f, -0.04f), eye_at(head, f, 0.30f,  0.02f, -0.14f), 0.025f, 0.004f, bone);
+    draw_shadow(x, z, 0.8f);
+}
+
+/* THE GLITCH: a person made of jittering blocks that tear, vanish and change colour */
+static void draw_glitch(float x, float z, float t, int slot)
+{
+    static const float parts[9][5] = {
+        /* x      y     sx    sy    sz */
+        {  0.00f, 1.85f, 0.30f, 0.30f, 0.30f },   /* head */
+        {  0.00f, 1.45f, 0.50f, 0.40f, 0.25f },   /* chest */
+        {  0.00f, 1.00f, 0.35f, 0.40f, 0.20f },   /* belly */
+        { -0.38f, 1.30f, 0.14f, 0.70f, 0.14f },   /* arms */
+        {  0.38f, 1.30f, 0.14f, 0.70f, 0.14f },
+        { -0.14f, 0.45f, 0.16f, 0.90f, 0.16f },   /* legs */
+        {  0.14f, 0.45f, 0.16f, 0.90f, 0.16f },
+        { -0.55f, 1.90f, 0.12f, 0.12f, 0.12f },   /* floating shards */
+        {  0.60f, 0.90f, 0.10f, 0.10f, 0.10f }
+    };
+    for (int i = 0; i < 9; i++) {
+        if (GetRandomValue(0, 9) == 0) continue;                           /* a part drops out */
+        float j = t * 20.0f + i * 3.0f + slot;
+        float tear = (GetRandomValue(0, 12) == 0) ? GetRandomValue(-30, 30) / 100.0f : 0.0f;
+        Vector3 p = v3(x + parts[i][0] + sinf(j) * 0.04f + tear, parts[i][1] + cosf(j * 1.3f) * 0.03f,
+                       z + sinf(j * 0.7f) * 0.04f);
+        int pick = ((int)(t * 8.0f) + i) % 3;
+        Color c = (pick == 0) ? MAGENTA : (pick == 1) ? SKYBLUE : RAYWHITE;
+        DrawCube(p, parts[i][2], parts[i][3], parts[i][4], Fade(c, 0.55f));
+        DrawCubeWires(p, parts[i][2], parts[i][3], parts[i][4], c);
+    }
+    DrawCube(v3(x - 0.08f, 1.88f, z + 0.16f), 0.07f, 0.04f, 0.02f, RAYWHITE);   /* eyes */
+    DrawCube(v3(x + 0.08f, 1.88f, z + 0.16f), 0.07f, 0.04f, 0.02f, RAYWHITE);
+    draw_shadow(x, z, 0.5f);
+}
+
+/* THE LEECH: a pulsing mass with tentacles on the floor and a lot of green eyes */
+static void draw_leech(float x, float z, float t, int slot, float dim, Facing f)
+{
+    Color flesh = shade((Color){ 88, 38, 108, 255 }, dim);
+    float pulse = 1.0f + sinf(t * 3.0f + slot) * 0.06f;
+    Vector3 c = v3(x, 0.6f, z);
+
+    DrawSphere(c, 0.62f * pulse, flesh);
+    DrawSphere(v3(x + 0.35f, 0.35f, z + 0.10f), 0.35f * pulse, flesh);
+    DrawSphere(v3(x - 0.38f, 0.30f, z - 0.05f), 0.30f * pulse, flesh);
+
+    for (int i = 0; i < 8; i++) {
+        float a    = i * 0.785f;
+        float wave = sinf(t * 2.0f + i) * 0.25f;
+        Vector3 a0 = v3(x + cosf(a) * 0.45f,                  0.18f, z + sinf(a) * 0.45f);
+        Vector3 a1 = v3(x + cosf(a + wave) * 0.95f,           0.10f, z + sinf(a + wave) * 0.95f);
+        Vector3 a2 = v3(x + cosf(a + wave * 1.6f) * 1.40f,    0.03f, z + sinf(a + wave * 1.6f) * 1.40f);
+        limb(a0, a1, 0.08f, 0.05f, flesh);
+        limb(a1, a2, 0.05f, 0.01f, flesh);
+    }
+    for (int e = 0; e < 6; e++) {
+        Vector3 p = eye_at(c, f, 0.55f, (e - 2.5f) * 0.14f, 0.10f + (e % 3) * 0.10f);
+        DrawSphere(p, 0.04f, LIME);
+        DrawSphere(eye_at(c, f, 0.59f, (e - 2.5f) * 0.14f, 0.10f + (e % 3) * 0.10f), 0.016f, BLACK);
+    }
+    /* slime dripping off it */
+    speck(v3(x + f.face.x * 0.5f, 0.45f - fmodf(t * 0.7f + slot, 0.4f), z + f.face.z * 0.5f), 0.02f, LIME);
+    draw_shadow(x, z, 1.0f);
+}
+
+/* creep = how far it has crept toward the camera while you kept watching */
+static void draw_intruder(const Intruder *in, int slot, float t, float k, Vector3 cam, float creep)
+{
+    float x = -2.4f + slot * 1.2f + sinf(t * 0.3f + slot) * 0.15f;
+    float z = 0.2f + creep;
     float dim = 0.5f + 0.5f * k;   /* bodies fade in the dark, eyes keep glowing */
-    Color body = shade((Color){ 30, 30, 30, 255 }, dim);
-    float ph = t * 1.6f + slot;
+    Facing f = facing_to(cam, x, z);
 
     switch (in->type) {
-        case INTRUDER_DRIFTER: { /* tall dark figure that sways, white eyes that flicker */
-            float lean = sinf(ph) * 0.08f;
-            DrawCylinder((Vector3){ x + lean, 0.0f, z }, 0.35f, 0.45f, 1.6f, 12, body);
-            DrawSphere((Vector3){ x + lean * 1.8f, 1.9f, z }, 0.4f, shade((Color){ 60, 50, 40, 255 }, dim));
-            if (GetRandomValue(0, 30) != 0) {
-                DrawSphere((Vector3){ x + lean * 1.8f - 0.15f, 1.95f, z + 0.33f }, 0.07f, RAYWHITE);
-                DrawSphere((Vector3){ x + lean * 1.8f + 0.15f, 1.95f, z + 0.33f }, 0.07f, RAYWHITE);
-            }
-            break;
-        }
-        case INTRUDER_SHADE: { /* very tall and thin, floats up and down, red eyes */
-            float fy = sinf(t * 2.0f + slot) * 0.1f + 0.1f;
-            DrawCylinder((Vector3){ x, fy, z }, 0.15f, 0.3f, 2.4f, 10, (Color){ 10, 10, 14, 255 });
-            DrawSphere((Vector3){ x, 2.6f + fy, z }, 0.3f, (Color){ 10, 10, 14, 255 });
-            DrawSphere((Vector3){ x - 0.1f, 2.65f + fy, z + 0.25f }, 0.06f, RED);
-            DrawSphere((Vector3){ x + 0.1f, 2.65f + fy, z + 0.25f }, 0.06f, RED);
-            break;
-        }
-        case INTRUDER_CRAWLER: { /* low and wide, legs skitter, orange eyes */
-            DrawCube((Vector3){ x, 0.3f, z }, 1.2f, 0.3f, 0.8f, body);
-            for (int i = 0; i < 4; i++) {
-                float skit = sinf(t * 14.0f + i * 1.6f) * 0.08f;
-                float lx = x + ((i % 2) ? 0.55f : -0.55f);
-                float lz = z + ((i / 2) ? 0.35f : -0.35f) + skit;
-                DrawCylinder((Vector3){ lx, 0.0f, lz }, 0.05f, 0.05f, 0.3f, 6, body);
-            }
-            DrawSphere((Vector3){ x - 0.2f, 0.35f, z + 0.42f }, 0.06f, ORANGE);
-            DrawSphere((Vector3){ x + 0.2f, 0.35f, z + 0.42f }, 0.06f, ORANGE);
-            break;
-        }
-        case INTRUDER_GLITCH: { /* jittering coloured cubes */
-            for (int i = 0; i < 3; i++) {
-                float j = t * 18.0f + i * 2.0f;
-                DrawCube((Vector3){ x + sinf(j) * 0.15f, 0.8f + i * 0.5f, z + cosf(j * 1.3f) * 0.15f },
-                         0.4f, 0.4f, 0.4f, (i % 2) ? MAGENTA : SKYBLUE);
-            }
-            break;
-        }
-        default: { /* leech: pulsing purple blob with green eyes */
-            DrawSphere((Vector3){ x, 0.6f, z }, 0.6f + sinf(t * 3.0f) * 0.05f,
-                       shade((Color){ 90, 40, 110, 255 }, dim));
-            for (int i = 0; i < 3; i++) {
-                DrawSphere((Vector3){ x + (i - 1) * 0.5f, 0.2f, z + 0.3f }, 0.2f,
-                           shade((Color){ 70, 30, 90, 255 }, dim));
-            }
-            DrawSphere((Vector3){ x - 0.2f, 0.8f, z + 0.5f }, 0.08f, LIME);
-            DrawSphere((Vector3){ x + 0.2f, 0.8f, z + 0.5f }, 0.08f, LIME);
-            break;
-        }
+        case INTRUDER_DRIFTER: draw_walker(x, z, t, slot, dim, f);  break;
+        case INTRUDER_SHADE:   draw_shade(x, z, t, slot, f);        break;
+        case INTRUDER_CRAWLER: draw_crawler(x, z, t, slot, dim, f); break;
+        case INTRUDER_GLITCH:  draw_glitch(x, z, t, slot);          break;
+        default:               draw_leech(x, z, t, slot, dim, f);   break;
     }
 }
 
@@ -732,13 +1014,143 @@ static void draw_ambient_eyes(int roomId, float t)
     }
 }
 
-/* thin see-through layers: the further away something is, the darker it looks */
-static void draw_haze(void)
+/* thin see-through layers: the further away something is, the darker it looks (smoke makes it worse) */
+static void draw_haze(float smoke)
 {
     static const float zs[5] = { -3.4f, -2.0f, -0.5f, 1.0f, 2.5f };   /* far to near */
     for (int i = 0; i < 5; i++) {
-        DrawCube((Vector3){ 0.0f, 1.75f, zs[i] }, 10.4f, 3.6f, 0.02f, Fade(BLACK, 0.09f));
+        DrawCube((Vector3){ 0.0f, 1.75f, zs[i] }, 10.4f, 3.6f, 0.02f, Fade(BLACK, 0.09f + 0.12f * smoke));
     }
+}
+
+/* where flames and smoke show up in a burning room */
+static const Vector3 FIRE_SPOTS[6] = {
+    { -1.5f, 0.0f, 0.2f }, { 1.2f, 0.0f, -0.8f }, { -2.5f, 0.0f, -1.0f },
+    {  2.0f, 0.0f, 0.8f }, { 0.0f, 0.0f, -2.0f }, { -3.2f, 0.0f, 1.0f }
+};
+
+/* flames: more of them, taller and angrier as the fire grows; a raging fire rolls across the ceiling */
+static void draw_fire(const Room *room, float t)
+{
+    float f = room->fire;
+    if (f <= 0.0f) return;
+
+    int n = 2 + (int)(f * 6.0f);
+    if (n > 8) n = 8;
+    for (int i = 0; i < n; i++) {
+        Vector3 p = FIRE_SPOTS[i % 6];
+        if (i >= 6) p.x += 0.9f;
+        float flick = 0.7f + 0.3f * sinf(t * 14.0f + i * 2.1f) * sinf(t * 8.0f + i);
+        float h     = (0.5f + 1.9f * f) * flick;
+        float r     = 0.24f + 0.26f * f;
+        float sway  = sinf(t * 5.0f + i) * 0.08f * f;
+
+        DrawCylinder(v3(p.x, 0.012f, p.z), r * 1.7f, r * 1.7f, 0.004f, 12, Fade(BLACK, 0.7f));    /* scorched floor */
+        DrawCylinder(v3(p.x, 0.0f, p.z), 0.0f, r * 1.25f, h, 8, (Color){ 190, 40, 10, 255 });
+        DrawCylinder(v3(p.x + sway, 0.0f, p.z), 0.0f, r, h * 0.8f, 8, (Color){ 255, 110, 20, 255 });
+        DrawCylinder(v3(p.x - sway, 0.0f, p.z), 0.0f, r * 0.6f, h * 0.55f, 8, (Color){ 255, 210, 80, 255 });
+    }
+    for (int i = 0; i < 14; i++) {                                     /* sparks and embers */
+        float rise = fmodf(t * (0.8f + 0.1f * (i % 4)) + i * 0.37f, 3.0f);
+        Vector3 p = FIRE_SPOTS[i % 6];
+        speck(v3(p.x + sinf(t * 3.0f + i) * 0.3f, 0.5f + rise, p.z + cosf(t * 2.0f + i) * 0.3f), 0.03f, ORANGE);
+    }
+    if (f > 0.7f) {                                                    /* flames along the ceiling */
+        for (int i = 0; i < 5; i++) {
+            float x = -3.0f + i * 1.5f + sinf(t * 4.0f + i) * 0.2f;
+            DrawCube(v3(x, 3.3f - 0.1f * sinf(t * 6.0f + i), -1.0f + (i % 2) * 1.5f), 1.2f, 0.25f, 1.2f,
+                     Fade((Color){ 255, 120, 30, 255 }, 0.8f));
+        }
+    }
+}
+
+/* smoke: a dark layer that sinks from the ceiling as the room fills, and rolling puffs */
+static void draw_smoke(const Room *room, float t)
+{
+    float s = room->sensors.smoke;
+    if (s < 0.03f) return;
+
+    float h = 0.4f + 2.6f * s;
+    DrawCube(v3(0.0f, 3.5f - h / 2.0f, 0.0f), 9.6f, h, 6.9f,
+             Fade((Color){ 25, 25, 28, 255 }, 0.18f + 0.45f * s));
+
+    int n = 6 + (int)(s * 20.0f);
+    for (int i = 0; i < n; i++) {
+        float rise = fmodf(t * 0.45f + i * 0.37f, 3.2f);
+        float x = FIRE_SPOTS[i % 6].x + sinf(t * 0.7f + i) * 0.5f;
+        float z = FIRE_SPOTS[i % 6].z + cosf(t * 0.6f + i * 1.3f) * 0.5f;
+        DrawSphere(v3(x, 0.6f + rise, z), 0.25f + rise * 0.18f,
+                   Fade((Color){ 40, 40, 44, 255 }, 0.10f + 0.25f * s));
+    }
+}
+
+/* the sprinkler head on the back wall, with its red glass bulb; when it is on, water sprays out in a cone */
+#define SPR_X  1.0f
+#define SPR_Y  2.75f
+#define SPR_Z -3.3f
+
+static void draw_sprinkler(const Room *room, float flow, float t)
+{
+    Vector3 head = v3(SPR_X, SPR_Y, SPR_Z);
+    limb(v3(SPR_X, 2.8f, -3.85f), head, 0.04f, 0.04f, GRAY);
+    DrawCylinder(v3(SPR_X, SPR_Y - 0.10f, SPR_Z), 0.09f, 0.09f, 0.02f, 8, GRAY);          /* the deflector plate */
+    limb(v3(SPR_X - 0.05f, SPR_Y, SPR_Z), v3(SPR_X - 0.05f, SPR_Y - 0.10f, SPR_Z), 0.008f, 0.008f, GRAY);
+    limb(v3(SPR_X + 0.05f, SPR_Y, SPR_Z), v3(SPR_X + 0.05f, SPR_Y - 0.10f, SPR_Z), 0.008f, 0.008f, GRAY);
+    if (!room->headFused) DrawSphere(v3(SPR_X, SPR_Y - 0.04f, SPR_Z), 0.03f, (Color){ 220, 30, 30, 255 });   /* the heat link */
+
+    if (flow <= 0.0f || !room->actuators.sprinklers) return;
+
+    for (int i = 0; i < 90; i++) {
+        float fall  = fmodf(t * (2.2f + 0.5f * flow) + i * 0.0733f, 1.0f);   /* 0 at the head, 1 at the floor */
+        float a     = i * 2.399f;
+        float reach = (0.2f + 1.9f * (float)(i % 7) / 6.0f) * flow * fall;
+        speck(v3(head.x + cosf(a) * reach, head.y - fall * head.y * 0.98f, head.z + 0.3f + sinf(a) * reach),
+              0.02f, Fade((Color){ 170, 215, 255, 255 }, 0.4f + 0.5f * flow));
+    }
+    for (int i = 0; i < 6; i++) {                                              /* mist near the floor */
+        float a = i * 1.05f + t * 0.4f;
+        DrawSphere(v3(head.x + cosf(a) * 1.2f, 0.25f, head.z + 0.5f + sinf(a) * 1.0f), 0.55f,
+                   Fade(RAYWHITE, 0.05f * flow));
+    }
+}
+
+/* a wet floor shines, and ripples spread where the water lands */
+static void draw_wet(const Room *room, bool spraying, float t)
+{
+    if (room->wet > 0.02f) {
+        DrawPlane(v3(0.0f, 0.015f, 0.0f), (Vector2){ 9.8f, 7.8f },
+                  Fade((Color){ 70, 110, 170, 255 }, 0.12f + 0.45f * room->wet));
+    }
+    if (!spraying) return;
+    for (int i = 0; i < 8; i++) {
+        float age = fmodf(t * 1.3f + i * 0.37f, 1.0f);
+        float a   = i * 2.1f;
+        Vector3 c = v3(SPR_X + cosf(a) * (0.4f + 0.25f * i), 0.02f, SPR_Z + 0.6f + sinf(a) * (0.4f + 0.2f * i));
+        DrawCircle3D(c, 0.05f + age * 0.35f, v3(1.0f, 0.0f, 0.0f), 90.0f, Fade(RAYWHITE, 0.5f * (1.0f - age)));
+    }
+}
+
+/* a burst pipe pours water from the ceiling and spreads a puddle */
+static void draw_leak(const Room *room, float t)
+{
+    if (!room->leak) return;
+    Vector3 top = v3(-1.6f, 3.5f, -0.5f);
+    Vector3 low = v3(-1.6f, 0.05f, -0.5f);
+    limb(top, low, 0.05f, 0.04f, Fade((Color){ 140, 190, 255, 255 }, 0.75f));
+    for (int i = 0; i < 6; i++) {
+        float a = i * 1.05f + t * 6.0f;
+        speck(v3(-1.6f + cosf(a) * 0.2f, 0.1f + fmodf(t * 2.0f + i * 0.3f, 0.3f), -0.5f + sinf(a) * 0.2f), 0.03f, Fade(RAYWHITE, 0.7f));
+    }
+    float r = 0.4f + 1.8f * room->wet;
+    DrawCylinder(v3(-1.6f, 0.016f, -0.5f), r, r, 0.004f, 16, Fade((Color){ 80, 130, 190, 255 }, 0.7f));
+}
+
+/* the smoke detector on the ceiling: its light blinks red when it is ringing */
+static void draw_detector(const Room *room, float t)
+{
+    DrawCylinder(v3(-1.2f, 3.43f, 1.3f), 0.12f, 0.12f, 0.05f, 10, (Color){ 220, 220, 225, 255 });
+    bool ringing = room->sensors.smokeDetected && ((int)(t * 6.0f)) % 2 == 0;
+    DrawSphere(v3(-1.2f, 3.40f, 1.3f), 0.035f, ringing ? RED : (Color){ 20, 90, 30, 255 });
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,9 +1169,17 @@ static void draw_room_3d(const Building *b, float t, const Hotspot *hs, int hove
 
     /* lights flicker, and flicker harder when something is in the room */
     float k = room->actuators.lightsOn ? 1.0f : 0.22f;
+    if (room->breakerTripped) k = 0.10f;
     if (room->actuators.lightsOn && GetRandomValue(0, someoneHere ? 6 : 90) == 0) k *= 0.45f;
+    if (room->fire > 0.0f) k = fmaxf(k, 0.35f + 0.6f * room->fire);        /* the fire lights the room */
 
-    BeginMode3D(room_camera(room->id, t));
+    /* the picture shakes when something bangs or explodes */
+    Camera3D cam = room_camera(room->id, t);
+    if (shake > 0.0f) {
+        cam.position.x += GetRandomValue(-100, 100) / 100.0f * shake * 0.25f;
+        cam.position.y += GetRandomValue(-100, 100) / 100.0f * shake * 0.18f;
+    }
+    BeginMode3D(cam);
 
     /* floor and walls (the camera side is left open) */
     draw_floor(room->id, look, k);
@@ -774,21 +1194,60 @@ static void draw_room_3d(const Building *b, float t, const Hotspot *hs, int hove
     draw_lamp(room, t);
     draw_props(room->id, t, k);
 
-    /* every awake intruder standing in this room */
+    bool spraying = room->actuators.sprinklers && b->water > 0.0f && !room->burnt;
+    draw_wet(room, spraying, t);
+    draw_leak(room, t);
+    draw_detector(room, t);
+    draw_sprinkler(room, spraying ? building_head_flow(b) : 0.0f, t);
+
+    /* every awake intruder standing in this room; they creep closer the longer you watch */
     for (int i = 0; i < b->intruderCount; i++) {
         const Intruder *in = &b->intruders[i];
-        if (in->active && in->room == room->id) draw_intruder(in, i, t, k);
+        if (in->active && in->room == room->id) {
+            draw_intruder(in, i, t, k, cam.position, fminf(1.6f, dwell[i] * 0.07f));
+        }
     }
 
     draw_ambient_eyes(room->id, t);
+    draw_fire(room, t);
+    draw_smoke(room, t);
     draw_dust(t);
 
     /* outline whatever the mouse is over */
     if (hover >= 0) DrawBoundingBox(hs[hover].box, Fade(RAYWHITE, 0.9f));
 
-    draw_haze();   /* must be last: see-through layers */
+    draw_haze(room->sensors.smoke);   /* must be last: see-through layers */
 
     EndMode3D();
+}
+
+/* a camera inside a room that burnt down shows nothing but static */
+static void draw_dead_camera(void)
+{
+    ClearBackground((Color){ 10, 10, 12, 255 });
+    for (int i = 0; i < 1800; i++) {
+        DrawRectangle(GetRandomValue(0, SCREEN_W), GetRandomValue(0, SCREEN_H), GetRandomValue(1, 8), 1,
+                      Fade(RAYWHITE, 0.25f));
+    }
+    const char *msg = "NO SIGNAL";
+    DrawText(msg, (SCREEN_W - MeasureText(msg, 40)) / 2, 175, 40, Fade(RAYWHITE, 0.8f));
+    const char *sub = "this room has burnt down";
+    DrawText(sub, (SCREEN_W - MeasureText(sub, 14)) / 2, 225, 14, GRAY);
+}
+
+/* the picture breaks up when something is watching you back */
+static void draw_interference(float strength)
+{
+    int bars = 2 + (int)(strength * 10.0f);
+    for (int i = 0; i < bars; i++) {
+        int y = GetRandomValue(0, SCREEN_H);
+        int h = GetRandomValue(1, 4 + (int)(strength * 10.0f));
+        Color c = (GetRandomValue(0, 3) == 0) ? (Color){ 200, 30, 30, 255 } : RAYWHITE;
+        DrawRectangle(0, y, SCREEN_W, h, Fade(c, 0.05f + 0.15f * strength));
+    }
+    if (strength > 0.6f && GetRandomValue(0, 20) == 0) {
+        DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade(BLACK, 0.5f));      /* a blackout flicker */
+    }
 }
 
 /* CRT look: scanlines, static and dark edges */
@@ -900,7 +1359,60 @@ static void draw_jumpscare(IntruderType type, float t)
     draw_scare_face(type, cx, cy, zoom);
 
     if (GetRandomValue(0, 5) == 0) DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade(RAYWHITE, 0.35f));
+
+    /* the picture tears, and the edges go red */
+    for (int i = 0; i < 8; i++) {
+        DrawRectangle(0, GetRandomValue(0, SCREEN_H), SCREEN_W, GetRandomValue(1, 6), Fade(RAYWHITE, 0.10f));
+    }
+    DrawRectangleGradientH(0, 0, 200, SCREEN_H, Fade(RED, 0.45f), Fade(RED, 0.0f));
+    DrawRectangleGradientH(SCREEN_W - 200, 0, 200, SCREEN_H, Fade(RED, 0.0f), Fade(RED, 0.45f));
     draw_camera_overlay();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Reactions: sounds and shakes for what the simulation just did      */
+/* ------------------------------------------------------------------ */
+
+static void react_to_events(const Building *b)
+{
+    static bool started = false;
+    static int moveSeq, bangSeq, boomSeq, zapSeq;
+
+    /* first frame, or a restarted night: just catch up */
+    if (!started || b->moveSeq < moveSeq || b->bangSeq < bangSeq || b->boomSeq < boomSeq || b->zapSeq < zapSeq) {
+        moveSeq = b->moveSeq;
+        bangSeq = b->bangSeq;
+        boomSeq = b->boomSeq;
+        zapSeq  = b->zapSeq;
+        started = true;
+        return;
+    }
+
+    if (b->moveSeq != moveSeq) {                 /* footsteps: loud if close, faint if far */
+        moveSeq = b->moveSeq;
+        bool close = (b->lastMoveRoom == b->selectedRoom) || (b->lastMoveRoom == 1);
+        if (audioOk) {
+            SetSoundVolume(sfx[SFX_STEP], close ? 0.7f : 0.2f);
+            PlaySound(sfx[SFX_STEP]);
+        }
+    }
+    if (b->bangSeq != bangSeq) { bangSeq = b->bangSeq; play(SFX_BANG); shake = 0.6f; }
+    if (b->boomSeq != boomSeq) { boomSeq = b->boomSeq; play(SFX_BOOM); shake = 1.0f; boomFlash = 0.7f; }
+    if (b->zapSeq  != zapSeq)  { zapSeq  = b->zapSeq;  play(SFX_ZAP);  switchFlash = 0.25f; }
+}
+
+/* the biggest text size (down to 9) at which the text still fits in maxw pixels */
+static int fit_size(const char *s, int size, int maxw)
+{
+    while (size > 9 && MeasureText(s, size) > maxw) size--;
+    return size;
+}
+
+/* one line of status text in the top right, only shown when something needs attention */
+static void chip(int *y, const char *text, Color col)
+{
+    DrawText(text, SCREEN_W - 12 - MeasureText(text, 11), *y, 11, col);
+    *y += 14;
 }
 
 /* ------------------------------------------------------------------ */
@@ -925,10 +1437,16 @@ void ui_draw(const Building *b)
         if (scareTime >= SCARE_LEN) scareDone = true;
     }
     if (scareTime >= 0.0f && !scareDone) {
-        if (audioOk) StopSound(sfx[SFX_HUM]);
+        if (audioOk) {
+            StopSound(sfx[SFX_HUM]);
+            StopSound(sfx[SFX_ALARM]);
+            StopSound(sfx[SFX_HISS]);
+        }
         draw_jumpscare(b->intruders[b->killer].type, scareTime);
         return;
     }
+
+    react_to_events(b);
 
     /* ambient hum while the night is running */
     if (audioOk) {
@@ -939,23 +1457,64 @@ void ui_draw(const Building *b)
         }
     }
 
+    /* fire alarm while any smoke alarm is ringing, hiss while any sprinkler is spraying */
+    int fires = 0, tripped = 0, leaks = 0;
+    bool alarm = false, spray = false;
+    for (int i = 0; i < b->roomCount; i++) {
+        const Room *r = &b->rooms[i];
+        if (r->fire > 0.0f) fires++;
+        if (r->breakerTripped) tripped++;
+        if (r->leak) leaks++;
+        if (r->sensors.smokeDetected) alarm = true;
+        if (r->actuators.sprinklers && b->water > 0.0f && !r->burnt) spray = true;
+    }
+    if (audioOk) {
+        if (b->state != GAME_PLAYING) { alarm = false; spray = false; }
+        if (alarm && !IsSoundPlaying(sfx[SFX_ALARM])) PlaySound(sfx[SFX_ALARM]);
+        if (!alarm) StopSound(sfx[SFX_ALARM]);
+        if (spray && !IsSoundPlaying(sfx[SFX_HISS])) PlaySound(sfx[SFX_HISS]);
+        if (!spray) StopSound(sfx[SFX_HISS]);
+    }
+
     update_anim(b, dt);
 
     const Room *room = &b->rooms[b->selectedRoom];
 
-    /* what is the mouse pointing at? (nothing while the dashboard is open) */
+    /* who is in the room you are watching, and for how long? the longer, the closer and the worse it gets */
+    bool watched = false;
+    for (int i = 0; i < b->intruderCount; i++) {
+        const Intruder *in = &b->intruders[i];
+        if (in->active && in->room == room->id) { dwell[i] += dt; watched = true; }
+        else                                     dwell[i] = 0.0f;
+    }
+    stare = watched ? stare + dt : fmaxf(0.0f, stare - 2.0f * dt);
+    whisperTimer -= dt;
+    if (stare > 3.0f && whisperTimer <= 0.0f) { play(SFX_WHISPER); whisperTimer = 4.0f; }
+
+    /* what is the mouse pointing at? (nothing while the dashboard or the panel is in the way) */
     Hotspot hs[MAX_HOTSPOTS];
     int n = build_hotspots(room->id, hs);
     int hover = -1;
     Vector2 mouse = GetMousePosition();
-    if (b->state == GAME_PLAYING && !graphs_visible() && !on_hud(b, mouse)) {
+    if (b->state == GAME_PLAYING && !room->burnt && !graphs_visible() && !on_hud(b, mouse)) {
         hover = pick_hotspot(hs, n, GetMouseRay(mouse, room_camera(room->id, t)));
     }
     SetMouseCursor(hover >= 0 ? MOUSE_CURSOR_POINTING_HAND : MOUSE_CURSOR_DEFAULT);
 
     ClearBackground(BLACK);
-    draw_room_3d(b, t, hs, hover);
+    if (room->burnt) draw_dead_camera();
+    else             draw_room_3d(b, t, hs, hover);
     draw_camera_overlay();
+    if (stare > 0.5f && !room->burnt) draw_interference(fminf(1.0f, 0.2f + stare * 0.12f));
+
+    /* orange glow when the room you are looking at is on fire, and a flash when it explodes */
+    if (room->fire > 0.0f && !room->burnt) {
+        float flick = 0.7f + 0.3f * sinf(t * 17.0f) * sinf(t * 5.0f);
+        DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade(ORANGE, 0.05f + 0.12f * room->fire * flick));
+    }
+    if (boomFlash > 0.0f) {
+        DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade((Color){ 255, 200, 120, 255 }, fminf(0.8f, boomFlash)));
+    }
 
     /* danger: something is in the Hallway, right outside the Office */
     bool danger = false;
@@ -986,85 +1545,104 @@ void ui_draw(const Building *b)
         }
     }
 
-    /* camera label and blinking REC dot (top left) */
-    DrawText(TextFormat("CAM %d  %s", room->id + 1, room->name), MARGIN, 18, 24, RAYWHITE);
-    if (((int)(t * 2.0f)) % 2 == 0) DrawCircle(MARGIN + 8, 58, 7, RED);
-    DrawText("REC", MARGIN + 24, 50, 18, RAYWHITE);
+    /* ---- the uncluttered screen ---- */
 
-    /* night clock and power (top right) */
+    /* top left: which camera, and the temperature */
+    DrawText(TextFormat("CAM %d  %s", room->id + 1, room->name), MARGIN, 14, 22, RAYWHITE);
+    if (((int)(t * 2.0f)) % 2 == 0) DrawCircle(MARGIN + 7, 46, 6, RED);
+    DrawText("REC", MARGIN + 20, 40, 14, RAYWHITE);
+    DrawText(TextFormat("%.0f C", room->sensors.temperature), MARGIN + 60, 40, 14,
+             (room->sensors.temperature > 40.0f) ? ORANGE : GRAY);
+
+    /* top right: the clock, power and water */
     int hour = building_hour(b);
-    DrawText(TextFormat("%d AM", hour == 0 ? 12 : hour), SCREEN_W - 110, 18, 30, RAYWHITE);
+    DrawText(TextFormat("%d AM", hour == 0 ? 12 : hour), SCREEN_W - 100, 10, 28, RAYWHITE);
 
     Color powerCol = (b->power > 40.0f) ? RAYWHITE : (b->power > 20.0f) ? ORANGE : RED;
-    DrawText(TextFormat("POWER %.0f%%", b->power), SCREEN_W - 170, 56, 22, powerCol);
+    DrawText(TextFormat("POWER %.0f%%", b->power), SCREEN_W - 160, 44, 11, powerCol);
+    DrawRectangle(SCREEN_W - 160, 58, 140, 5, Fade(GRAY, 0.5f));
+    DrawRectangle(SCREEN_W - 160, 58, (int)(1.4f * b->power), 5, powerCol);
 
-    int bars = (int)(building_power_usage(b) / 0.1f);
-    if (bars < 1) bars = 1;
-    if (bars > 8) bars = 8;
-    DrawText("USAGE", SCREEN_W - 170, 86, 14, GRAY);
-    for (int i = 0; i < bars; i++) {
-        DrawRectangle(SCREEN_W - 110 + i * 11, 86, 8, 14, (i < 3) ? GREEN : (i < 5) ? ORANGE : RED);
+    DrawText(TextFormat("WATER %.0f%%", b->water), SCREEN_W - 160, 68, 11, (b->water > 30.0f) ? SKYBLUE : ORANGE);
+    DrawRectangle(SCREEN_W - 160, 82, 140, 5, Fade(GRAY, 0.5f));
+    DrawRectangle(SCREEN_W - 160, 82, (int)(1.4f * b->water), 5, (b->water > 30.0f) ? SKYBLUE : ORANGE);
+
+    /* only what needs attention shows up here */
+    {
+        int cy = 94;
+        bool blink = ((int)(t * 3.0f)) % 2 == 0;
+        if (b->powerOut)                   { if (blink) chip(&cy, "NO POWER", RED); else cy += 14; }
+        else if (b->ecoMode)                chip(&cy, "ECO MODE", GREEN);
+        if (fires > 0)                     { if (blink) chip(&cy, TextFormat("FIRE x%d", fires), ORANGE); else cy += 14; }
+        if (b->netOutage > 0.0f)            chip(&cy, "INTERNET DOWN", ORANGE);
+        if (b->heatwave > 0.0f)             chip(&cy, "HEAT WAVE", ORANGE);
+        if (leaks > 0)                      chip(&cy, "LEAK", SKYBLUE);
+        if (tripped > 0)                    chip(&cy, TextFormat("BREAKER OFF x%d", tripped), ORANGE);
+        if (b->lockdownTimer > 0.0f)        chip(&cy, TextFormat("LOCKDOWN %.0fs", b->lockdownTimer), RED);
     }
 
-    if (b->powerOut && ((int)(t * 2.0f)) % 2 == 0) {
-        DrawText("POWER OUT", SCREEN_W / 2 - 90, 60, 30, RED);
+    /* top centre: the latest important event, and the advisor's tip when something is wrong */
+    if (b->noticeTimer > 0.0f) {
+        const char *msg = b->notice;
+        Color nc = GOLD;
+        if (strstr(msg, "FIRE") || strstr(msg, "FLASHOVER") || strstr(msg, "BACKDRAFT") || strstr(msg, "BURNT")) nc = ORANGE;
+        if (strstr(msg, "POWER OUT")) nc = RED;
+        int size = fit_size(msg, 18, 440);
+        int x = 190 + (440 - MeasureText(msg, size)) / 2;
+        DrawText(msg, x, 12, size, Fade(nc, fminf(1.0f, b->noticeTimer)));
+    }
+    {
+        const char *tip = building_advice(b);
+        if (strcmp(tip, "All systems normal") != 0) {
+            int size = fit_size(tip, 12, 440);
+            int x = 190 + (440 - MeasureText(tip, size)) / 2;
+            DrawText(tip, x, 38, size, GOLD);
+        }
     }
 
-    /* alert (top centre) */
-    if (room->alert != ALERT_NONE) {
-        DrawText(room->alert == ALERT_CRITICAL ? "! CRITICAL" : "! WARNING",
-                 SCREEN_W / 2 - 60, 20, 24, alert_colour(room->alert));
-    }
-
-    /* readout line */
-    DrawText(TextFormat("TEMP %.1fC (TARGET %.1fC)   MOTION: %s   DOOR: %s   LIGHTS: %s   VENT: %s",
-                        room->sensors.temperature, room->sensors.targetTemp,
-                        room->sensors.motionDetected ? "YES" : "no",
-                        room->actuators.doorLocked ? "locked" : "unlocked",
-                        room->actuators.lightsOn ? "on" : "off",
-                        room->actuators.hvacOn ? "open" : "sealed"),
-             MARGIN, SCREEN_H - 110, 14, RAYWHITE);
-
-    /* camera map (bottom right): red dot = motion in that room */
+    /* bottom right: the camera map (red dot = motion, orange = fire, grey = smoke) */
     for (int i = 0; i < b->roomCount; i++) {
+        const Room *r2 = &b->rooms[i];
         Rectangle r = button_rect(i);
         bool sel = (i == b->selectedRoom);
         DrawRectangleRec(r, sel ? Fade(RAYWHITE, 0.85f) : Fade(BLACK, 0.6f));
-        DrawRectangleLinesEx(r, 2, alert_colour(b->rooms[i].alert));
+        DrawRectangleLinesEx(r, 2, alert_colour(r2->alert));
         DrawText(TextFormat("%d %s", i + 1, SHORT_NAME[i]), (int)r.x + 6, (int)r.y + 9, 12,
                  sel ? BLACK : RAYWHITE);
-        if (b->rooms[i].sensors.motionDetected) DrawCircle((int)r.x + MAP_W - 8, (int)r.y + 8, 4, RED);
+        if (r2->burnt)                          DrawText("X", (int)r.x + MAP_W - 14, (int)r.y + 3, 12, RED);
+        else {
+            if (r2->sensors.motionDetected)     DrawCircle((int)r.x + MAP_W - 8, (int)r.y + 8, 4, RED);
+            if (r2->fire > 0.0f)                DrawCircle((int)r.x + MAP_W - 20, (int)r.y + 8, 4, ORANGE);
+            else if (r2->sensors.smokeDetected) DrawCircle((int)r.x + MAP_W - 20, (int)r.y + 8, 4, GRAY);
+            if (r2->breakerTripped)             DrawRectangle((int)r.x + MAP_W - 32, (int)r.y + 4, 8, 8, YELLOW);
+        }
     }
 
-    /* light, door and graphs buttons (bottom left) */
-    Rectangle lb = light_btn_rect();
-    DrawRectangleRec(lb, Fade(BLACK, 0.6f));
-    DrawRectangleLinesEx(lb, 2, room->actuators.lightsOn ? YELLOW : GRAY);
-    DrawText("LIGHTS", (int)lb.x + 14, (int)lb.y + 10, 16,
-             room->actuators.lightsOn ? YELLOW : GRAY);
-
-    Rectangle db = door_btn_rect();
-    bool locked = room->actuators.doorLocked;
-    DrawRectangleRec(db, Fade(BLACK, 0.6f));
-    DrawRectangleLinesEx(db, 2, locked ? RED : GREEN);
-    DrawText(locked ? "LOCKED" : "UNLOCKED", (int)db.x + 14, (int)db.y + 10, 16,
-             locked ? RED : GREEN);
+    /* bottom left: the two buttons */
+    Rectangle cb = control_btn_rect();
+    DrawRectangleRec(cb, Fade(BLACK, 0.6f));
+    DrawRectangleLinesEx(cb, 2, panel_visible() ? RAYWHITE : GREEN);
+    DrawText("CONTROL", (int)cb.x + 10, (int)cb.y + 7, 14, GREEN);
 
     Rectangle gb = graph_btn_rect();
     DrawRectangleRec(gb, Fade(BLACK, 0.6f));
     DrawRectangleLinesEx(gb, 2, SKYBLUE);
-    DrawText("GRAPHS", (int)gb.x + 14, (int)gb.y + 10, 16, SKYBLUE);
+    DrawText("GRAPHS", (int)gb.x + 10, (int)gb.y + 7, 14, SKYBLUE);
 
-    DrawText("Click things in the room. 1-6 cameras, L lights, D door, TAB graphs, K end night (test)",
-             MARGIN, SCREEN_H - 20, 12, GRAY);
+    DrawText("SPACE control panel   TAB graphs   1-6 cameras   (test: F fire, E event, K end)",
+             MARGIN, SCREEN_H - 16, 10, GRAY);
+
+    panel_draw(b);
 
     /* end of night: shown over everything, no menu */
     if (b->state != GAME_PLAYING) {
         DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade(BLACK, 0.85f));
 
         const char *msg = "GAME OVER";
-        if (b->state == GAME_WON) msg = "6 AM - YOU SURVIVED";
-        else if (b->killer >= 0)  msg = TextFormat("CAUGHT BY %s", b->intruders[b->killer].name);
+        if (b->state == GAME_WON)               msg = "6 AM - YOU SURVIVED";
+        else if (b->cause == CAUSE_FIRE)        msg = "THE BUILDING BURNED";
+        else if (b->cause == CAUSE_SMOKE)       msg = "OVERCOME BY SMOKE";
+        else if (b->killer >= 0)                msg = TextFormat("CAUGHT BY %s", b->intruders[b->killer].name);
 
         int w = MeasureText(msg, 50);
         DrawText(msg, (SCREEN_W - w) / 2, 170, 50, (b->state == GAME_WON) ? GREEN : RED);
