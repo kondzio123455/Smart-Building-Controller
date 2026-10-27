@@ -148,7 +148,6 @@ static Sound synth(int kind, float seconds)
 void ui_init(void)
 {
     dashboard_show(START_IN_BUILDING_VIEW);
-    help_show(true);                       /* a new player starts on the how-to-play pages */
     render_init(SCREEN_W, SCREEN_H);
     InitAudioDevice();
     audioOk = IsAudioDeviceReady();

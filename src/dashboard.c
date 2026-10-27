@@ -218,18 +218,37 @@ static void draw_right_pane(const Building *b)
     AlarmLine alarms[MAX_ALARMS];
     int n = collect_alarms(b, alarms);
 
-    Rectangle box = { RIGHT_X, 216, RIGHT_W, 150 };
+    Rectangle box = { RIGHT_X, 216, RIGHT_W, 72 };
     DrawRectangleRec(box, Fade(BLACK, 0.5f));
     DrawRectangleLinesEx(box, 1, (n > 0) ? RED : GRAY);
-    DrawText(TextFormat("ACTIVE ALARMS (%d)", n), RIGHT_X + 8, 222, 11, (n > 0) ? RED : GRAY);
+    DrawText(TextFormat("ACTIVE ALARMS (%d)", n), RIGHT_X + 8, 221, 11, (n > 0) ? RED : GRAY);
 
     if (n == 0) {
-        DrawText("No active alarms", RIGHT_X + 8, 242, 12, GREEN);
+        DrawText("No active alarms", RIGHT_X + 8, 238, 12, GREEN);
     }
-    for (int i = 0; i < n && i < 9; i++) {
-        DrawText(alarms[i].text, RIGHT_X + 8, 240 + i * 14, 11, alarms[i].col);
+    for (int i = 0; i < n && i < 3; i++) {
+        DrawText(alarms[i].text, RIGHT_X + 8, 236 + i * 14, 11, alarms[i].col);
     }
-    if (n > 9) DrawText(TextFormat("+ %d more", n - 9), RIGHT_X + 8, 240 + 9 * 14, 10, GRAY);
+    if (n > 3) DrawText(TextFormat("+ %d more", n - 3), RIGHT_X + 200, 221, 10, GRAY);
+
+    /* automation: the rules the building runs by itself */
+    Rectangle auto_box = { RIGHT_X, 292, RIGHT_W, 74 };
+    int active = 0;
+    for (int i = 0; i < MAX_RULES; i++) if (b->rules[i].enabled) active++;
+    DrawRectangleRec(auto_box, Fade(BLACK, 0.5f));
+    DrawRectangleLinesEx(auto_box, 1, GRAY);
+    DrawText(TextFormat("AUTOMATION (%d of %d rules on)", active, MAX_RULES), RIGHT_X + 8, 297, 11, GREEN);
+    if (b->netOutage > 0.0f) DrawText("CLOUD OFFLINE", RIGHT_X + 190, 297, 10, ORANGE);
+    for (int i = 0; i < MAX_RULES; i++) {
+        int col = i % 2, row = i / 2;
+        int x = RIGHT_X + 8 + col * 140;
+        int y = 313 + row * 13;
+        bool on = b->rules[i].enabled;
+        bool offline = rule_is_cloud((RuleId)i) && b->netOutage > 0.0f;
+        DrawRectangle(x, y + 1, 6, 7, !on ? RED : offline ? ORANGE : GREEN);
+        DrawText(TextFormat("%s %s", rule_name((RuleId)i), b->rules[i].fired > 0 ? TextFormat("x%d", b->rules[i].fired) : ""),
+                 x + 10, y - 1, 10, on ? RAYWHITE : GRAY);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -350,7 +369,7 @@ void dashboard_draw(const Building *b)
     /* header */
     DrawRectangle(0, 0, SCREEN_W, 30, (Color){ 12, 16, 22, 255 });
     DrawText("SMART BUILDING CONTROLLER", 12, 7, 16, RAYWHITE);
-    DrawText("GOAL: survive until 6 AM", 290, 10, 12, GOLD);
+    DrawText("LIVE MONITORING", 290, 10, 12, GOLD);
     DrawRectangleRec(help_btn(), Fade(GOLD, hit(help_btn()) ? 0.30f : 0.10f));
     DrawRectangleLinesEx(help_btn(), 1, GOLD);
     DrawText("? HELP", 534, 9, 12, RAYWHITE);
