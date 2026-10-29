@@ -104,6 +104,15 @@ typedef enum {
     EVENT_COUNT
 } EventId;
 
+/* The weather outside (see building_start_weather). It changes the outside temperature. */
+typedef enum {
+    WEATHER_NORMAL,     /* a mild night: nothing unusual */
+    WEATHER_COLD_SNAP,  /* the outside temperature plunges: sealed rooms cool, heating costs more power */
+    WEATHER_WARM_SPELL, /* the outside temperature climbs: sealed rooms bake, cooling costs more power */
+    WEATHER_STORM,      /* a little colder, and breakers trip and the internet drops more often */
+    WEATHER_COUNT
+} WeatherId;
+
 typedef struct {
     IntruderType type;
     char  name[INTRUDER_NAME_LEN];
@@ -188,6 +197,18 @@ typedef struct {
     float     netOutage;    /* seconds left */
     float     netSpeed;     /* Mbps right now */
 
+    /* weather */
+    WeatherId weather;      /* what it is doing outside right now */
+    float     weatherTimer; /* clear: seconds until the next front; otherwise seconds until it clears */
+    float     weatherShift; /* degrees C added to the outside temperature right now (eases toward the target) */
+
+    /* backup generator */
+    bool      genOn;        /* started (it may still be warming up) */
+    float     genFuel;      /* 100.0 full tank ... 0.0 empty */
+    float     genWarmup;    /* seconds until it delivers power after a start */
+
+    bool      quitRequested;/* the player asked to close the app */
+
     bool      ecoMode;
     int       scheduleMode; /* 0 not applied yet, 1 night setback, 2 comfort */
     float     lockdownTimer;
@@ -222,17 +243,22 @@ void  game_lose(Building *b);
 
 bool        building_start_fire(Building *b, int room);   /* returns false if it is already burning */
 bool        building_start_event(Building *b, EventId id);/* returns false if it cannot start now */
+bool        building_start_weather(Building *b, WeatherId id);   /* returns false if that weather is already on */
 bool        scene_activate(Building *b, SceneId id);      /* returns false if refused */
 const char *scene_name(SceneId id);
 const char *rule_name(RuleId id);
 const char *rule_info(RuleId id);
 bool        rule_is_cloud(RuleId id);                      /* cloud rules stop while the internet is down */
 const char *event_name(EventId id);
+const char *weather_name(WeatherId id);
+const char *weather_info(WeatherId id);                    /* one line: what this weather does to the building */
 
 const char *building_advice(const Building *b);           /* one-line tip from the smart advisor */
 float       building_power_left(const Building *b);       /* seconds until the power runs out at the current usage */
 int         building_heads_running(const Building *b);    /* sprinkler heads spraying right now */
 float       building_head_flow(const Building *b);        /* 0.0 .. 1.0: how strongly each head sprays */
+float       building_generator_output(const Building *b); /* power added per second right now (0 if off or warming up) */
+float       building_generator_runtime(const Building *b);/* seconds of fuel left at full burn */
 
 void            log_event(Building *b, const char *fmt, ...);
 void            log_alert(Building *b, const char *fmt, ...);   /* logs it and shows a banner */
@@ -247,6 +273,8 @@ void room_set_hvac(Room *r, bool on);
 void room_set_sprinklers(Room *r, bool on);
 bool building_set_breaker(Building *b, int room, bool on);/* on=false cuts the room's power, on=true resets it (false if it cannot be reset yet) */
 void building_set_main_valve(Building *b, bool open);
+bool building_set_generator(Building *b, bool on);        /* false if it cannot start (no fuel) */
+void building_request_quit(Building *b);                  /* main() leaves its loop and closes the window */
 
 /* ---- UI layer ---- */
 void ui_init(void);                 /* call once after InitWindow */

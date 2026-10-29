@@ -27,6 +27,21 @@
 #define HEATWAVE_SECONDS   70.0f    /* an HVAC fault */
 #define HEATWAVE_BONUS     8.0f     /* sealed rooms get 8 C hotter, open vents work at half speed */
 
+/* backup generator */
+#define GEN_OUTPUT         0.30f    /* battery percent added per second while it runs */
+#define GEN_FUEL_USE       0.45f    /* tank units burnt per second while it runs (a full tank lasts about 3.7 minutes) */
+#define GEN_WARMUP         5.0f     /* seconds from pressing START to delivering power */
+#define GEN_RESTORE_AT     5.0f     /* after a blackout the building comes back once the battery is at this level */
+
+/* weather */
+#define WEATHER_FIRST_MIN  60       /* seconds until the first front: 60-99 */
+#define WEATHER_GAP_MIN    70       /* seconds of mild weather between fronts: 70-129 */
+#define WEATHER_LAST_MIN   60       /* seconds a front lasts: 60-99 */
+#define WEATHER_EASE       0.20f    /* degrees C per second that the outside temperature moves */
+#define WEATHER_SEALED_FACTOR 0.5f  /* how much of the outside shift reaches a sealed room */
+#define STORM_SURGE_CHANCE 0.012f   /* per second, while a storm is on */
+#define STORM_NET_CHANCE   0.010f
+
 /* fire */
 #define FIRE_GROW          0.020f   /* base growth per second; it speeds up as the fire gets bigger */
 #define FIRE_SEALED_AIR    0.55f    /* a sealed vent with an unlocked door still lets some air in */
@@ -105,6 +120,16 @@ static const char *EVENT_NAMES[EVENT_COUNT] = {
     "POWER SURGE", "BURST PIPE", "HVAC FAULT", "INTERNET DOWN", "FALSE ALARM", "DOOR FAULT"
 };
 
+static const char *WEATHER_NAMES[WEATHER_COUNT] = {
+    "MILD", "COLD SNAP", "WARM SPELL", "STORM"
+};
+static const char *WEATHER_INFO[WEATHER_COUNT] = {
+    "A mild night. Nothing unusual.",
+    "Sealed rooms cool down. Heating costs more power.",
+    "Sealed rooms bake. Cooling costs more power.",
+    "Breakers trip and the internet drops more often."
+};
+
 const char *scene_name(SceneId id)
 {
     return ((int)id >= 0 && (int)id < MAX_SCENES) ? SCENE_NAMES[id] : "?";
@@ -128,6 +153,16 @@ bool rule_is_cloud(RuleId id)
 const char *event_name(EventId id)
 {
     return ((int)id >= 0 && (int)id < EVENT_COUNT) ? EVENT_NAMES[id] : "?";
+}
+
+const char *weather_name(WeatherId id)
+{
+    return ((int)id >= 0 && (int)id < WEATHER_COUNT) ? WEATHER_NAMES[id] : "?";
+}
+
+const char *weather_info(WeatherId id)
+{
+    return ((int)id >= 0 && (int)id < WEATHER_COUNT) ? WEATHER_INFO[id] : "";
 }
 
 static float clampf(float v, float lo, float hi)
@@ -265,6 +300,14 @@ void building_init(Building *b)
     b->fireTimer  = (float)(FIRE_FIRST_MIN + rand() % 60);
     b->eventTimer = (float)(EVENT_FIRST_MIN + rand() % 30);
 
+    b->weather      = WEATHER_NORMAL;
+    b->weatherTimer = (float)(WEATHER_FIRST_MIN + rand() % 40);
+    b->weatherShift = 0.0f;
+
+    b->genOn     = false;
+    b->genFuel   = 100.0f;
+    b->genWarmup = 0.0f;
+
     /* the safety rules start on; the ones that play the game for you start off */
     b->rules[RULE_VENT].enabled = true;
     b->rules[RULE_FIRE].enabled = true;
@@ -304,10 +347,10 @@ static bool controllable(const Room *r)
 /*  Weather and energy prices                                          */
 /* ------------------------------------------------------------------ */
 
-/* an Irish autumn night: about 9 C at midnight, falling to about 4 C by 6 AM */
+/* an Irish autumn night: about 9 C at midnight, falling to about 4 C by 6 AM, plus whatever the weather is doing */
 float building_outside_temp(const Building *b)
 {
-    return 9.0f - 0.9f * (b->nightTime / SECONDS_PER_HOUR);
+    return 9.0f - 0.9f * (b->nightTime / SECONDS_PER_HOUR) + b->weatherShift;
 }
 
 /* cheap night rate until 5 AM, then the morning peak */
@@ -319,6 +362,120 @@ float building_tariff(const Building *b)
 const char *building_tariff_name(const Building *b)
 {
     return (building_hour(b) < 5) ? "NIGHT RATE" : "MORNING PEAK";
+}
+
+/* how far from the normal night temperature a kind of weather pushes the outside air */
+static float weather_target_shift(WeatherId w)
+{
+    switch (w) {
+        case WEATHER_COLD_SNAP:  return -9.0f;
+        case WEATHER_WARM_SPELL: return 10.0f;
+        case WEATHER_STORM:      return -2.0f;
+        default:                 return 0.0f;
+    }
+}
+
+bool building_start_weather(Building *b, WeatherId id)
+{
+    if ((int)id <= (int)WEATHER_NORMAL || (int)id >= (int)WEATHER_COUNT) return false;
+    if (b->weather == id) return false;
+
+    b->weather      = id;
+    b->weatherTimer = (float)(WEATHER_LAST_MIN + rand() % 40);
+
+    switch (id) {
+        case WEATHER_COLD_SNAP:  log_alert(b, "COLD SNAP: the temperature outside is plunging"); break;
+        case WEATHER_WARM_SPELL: log_alert(b, "WARM SPELL: the temperature outside is climbing"); break;
+        case WEATHER_STORM:      log_alert(b, "STORM: expect surges and network trouble");        break;
+        default: break;
+    }
+    return true;
+}
+
+static void update_weather(Building *b, float dt)
+{
+    /* a front arrives, or the current one blows over */
+    b->weatherTimer -= dt;
+    if (b->weatherTimer <= 0.0f) {
+        if (b->weather == WEATHER_NORMAL) {
+            building_start_weather(b, (WeatherId)(1 + rand() % ((int)WEATHER_COUNT - 1)));
+        } else {
+            b->weather      = WEATHER_NORMAL;
+            b->weatherTimer = (float)(WEATHER_GAP_MIN + rand() % 60);
+            log_event(b, "The weather is clearing");
+        }
+    }
+
+    /* the outside temperature eases toward where the weather wants it */
+    float target = weather_target_shift(b->weather);
+    float step   = WEATHER_EASE * dt;
+    float diff   = target - b->weatherShift;
+    if (diff > step)       b->weatherShift += step;
+    else if (diff < -step) b->weatherShift -= step;
+    else                   b->weatherShift = target;
+
+    /* a storm shakes the electrics and the network */
+    if (b->weather == WEATHER_STORM) {
+        if (chance(STORM_SURGE_CHANCE, dt) && building_start_event(b, EVENT_SURGE))  b->eventCount++;
+        if (chance(STORM_NET_CHANCE, dt)   && building_start_event(b, EVENT_NETFAIL)) b->eventCount++;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  The backup generator                                               */
+/* ------------------------------------------------------------------ */
+
+float building_generator_output(const Building *b)
+{
+    return (b->genOn && b->genWarmup <= 0.0f && b->genFuel > 0.0f) ? GEN_OUTPUT : 0.0f;
+}
+
+float building_generator_runtime(const Building *b)
+{
+    return b->genFuel / GEN_FUEL_USE;
+}
+
+/* warms up, burns fuel, and says how much power it is putting in this second */
+static float update_generator(Building *b, float dt)
+{
+    if (!b->genOn) return 0.0f;
+
+    if (b->genWarmup > 0.0f) {
+        b->genWarmup -= dt;
+        if (b->genWarmup > 0.0f) return 0.0f;
+        b->genWarmup = 0.0f;
+        log_event(b, "Generator is up to speed");
+    }
+
+    b->genFuel -= GEN_FUEL_USE * dt;
+    if (b->genFuel <= 0.0f) {
+        b->genFuel = 0.0f;
+        b->genOn   = false;
+        log_alert(b, "GENERATOR OUT OF FUEL");
+        return 0.0f;
+    }
+    return GEN_OUTPUT;
+}
+
+bool building_set_generator(Building *b, bool on)
+{
+    if (b->state != GAME_PLAYING) return false;
+    if (on == b->genOn) return true;
+
+    if (!on) {
+        b->genOn     = false;
+        b->genWarmup = 0.0f;
+        log_event(b, "Generator stopped");
+        return true;
+    }
+    if (b->genFuel <= 0.0f) {
+        log_event(b, "The generator has no fuel");
+        return false;
+    }
+    b->genOn     = true;
+    b->genWarmup = GEN_WARMUP;
+    log_event(b, "Generator starting...");
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -453,10 +610,11 @@ float building_power_usage(const Building *b)
     return use;
 }
 
+/* seconds until the battery is empty, counting what the generator puts back in */
 float building_power_left(const Building *b)
 {
-    float use = building_power_usage(b);
     if (b->powerOut) return 0.0f;
+    float use = building_power_usage(b) - building_generator_output(b);
     return (use > 0.0f) ? b->power / use : 99999.0f;
 }
 
@@ -1198,12 +1356,15 @@ void building_update(Building *b, float dt)
     }
     int hour = building_hour(b);
 
-    /* power: drains faster the more is switched on; at zero everything fails */
+    /* power: drains faster the more is switched on; the generator puts power back; at zero everything fails */
+    float gen = update_generator(b, dt);
     if (!b->powerOut) {
-        float use = building_power_usage(b);
-        b->power  -= use * dt;
+        float use         = building_power_usage(b);
+        float fromBattery = (use > gen) ? use - gen : 0.0f;   /* generator power is not billed */
+        b->power  += (gen - use) * dt;
+        if (b->power > 100.0f) b->power = 100.0f;
         b->energy += use * dt * KWH_PER_POWER;
-        b->cost   += use * dt * KWH_PER_POWER * building_tariff(b);
+        b->cost   += fromBattery * dt * KWH_PER_POWER * building_tariff(b);
         if (b->power <= 0.0f) {
             b->power = 0.0f;
             b->powerOut = true;
@@ -1214,6 +1375,13 @@ void building_update(Building *b, float dt)
                 if (!b->rooms[i].headFused) a->sprinklers = false;   /* the valves are electric; fused heads stay open */
             }
             log_alert(b, "POWER OUT: lights and doors are dead");
+        }
+    } else if (gen > 0.0f) {
+        /* a blackout: the generator charges the battery, and the building wakes up again */
+        b->power += gen * dt;
+        if (b->power >= GEN_RESTORE_AT) {
+            b->powerOut = false;
+            log_alert(b, "POWER RESTORED by the generator: switch the lights back on");
         }
     }
 
@@ -1238,7 +1406,8 @@ void building_update(Building *b, float dt)
         if (in->type == INTRUDER_GLITCH) b->rooms[in->room].actuators.lightsOn = false;
     }
 
-    /* random events, then fire, smoke and sprinklers */
+    /* the weather, random events, then fire, smoke and sprinklers */
+    update_weather(b, dt);
     update_events(b, dt);
     update_hazards(b, dt);
     if (b->state != GAME_PLAYING) return;
@@ -1250,7 +1419,9 @@ void building_update(Building *b, float dt)
         r->sensors.secondsSinceMotion += dt;
         r->sensors.motionDetected = !r->breakerTripped && (r->sensors.secondsSinceMotion < MOTION_SECONDS);
 
-        r->sensors.temperature = temp_step(r->sensors.temperature, r->sensors.targetTemp, SEALED_GOAL[i],
+        /* a sealed room follows the weather outside a little: cooler in a cold snap, hotter in a warm spell */
+        float sealedGoal = SEALED_GOAL[i] + b->weatherShift * WEATHER_SEALED_FACTOR;
+        r->sensors.temperature = temp_step(r->sensors.temperature, r->sensors.targetTemp, sealedGoal,
                                            r->actuators.hvacOn, hot, dt);
         room_evaluate_alert(r);
     }
@@ -1295,7 +1466,11 @@ const char *building_advice(const Building *b)
     static char buf[110];
 
     if (b->state != GAME_PLAYING) return "The night is over";
-    if (b->powerOut) return "POWER OUT: nothing responds until morning";
+    if (b->powerOut) {
+        if (b->genOn)          return "POWER OUT: the generator is charging the battery";
+        if (b->genFuel > 0.0f) return "POWER OUT: start the generator (CONTROL > SITE)";
+        return "POWER OUT: nothing responds until morning";
+    }
 
     for (int i = 0; i < b->roomCount; i++) {
         const Room *r = &b->rooms[i];
@@ -1342,12 +1517,13 @@ const char *building_advice(const Building *b)
     }
     if (b->netOutage > 0.0f) return "Internet is down: the cloud automations are paused";
     if (b->heatwave > 0.0f)  return "HVAC fault: keep the vents open";
+    if (b->weather == WEATHER_STORM) return "Storm outside: watch the breakers and the network";
 
     float left  = building_power_left(b);
     float night = NIGHT_HOURS * SECONDS_PER_HOUR - b->nightTime;
     if (left < night) {
         int s = (int)left;
-        snprintf(buf, sizeof buf, "Power runs out in %d:%02d, before morning (try ECO)", s / 60, s % 60);
+        snprintf(buf, sizeof buf, "Power runs out in %d:%02d, before morning (ECO or the generator)", s / 60, s % 60);
         return buf;
     }
 
@@ -1393,6 +1569,11 @@ void room_set_sprinklers(Room *r, bool on)
     if (!controllable(r)) return;
     r->actuators.sprinklers = on;
     if (!on) r->headFused = false;       /* closing the valve stops the water; the head is replaced later */
+}
+
+void building_request_quit(Building *b)
+{
+    b->quitRequested = true;
 }
 
 int building_hour(const Building *b)

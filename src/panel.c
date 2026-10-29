@@ -12,11 +12,12 @@
 #define CX (PX + 10)
 #define CY (PY + 36)
 
-enum { TAB_ROOM, TAB_SCENES, TAB_AUTO, TAB_UTIL, TAB_LOG, TAB_COUNT };
-static const char *TAB_NAMES[TAB_COUNT] = { "ROOM", "SCENES", "AUTO", "UTILITY", "LOG" };
+enum { TAB_ROOM, TAB_SCENES, TAB_AUTO, TAB_UTIL, TAB_SITE, TAB_LOG, TAB_COUNT };
+static const char *TAB_NAMES[TAB_COUNT] = { "ROOM", "SCENES", "AUTO", "UTILITY", "SITE", "LOG" };
 
-static bool open = false;
-static int  tab  = TAB_ROOM;
+static bool  open = false;
+static int   tab  = TAB_ROOM;
+static float quitArmed = 0.0f;      /* seconds left in which a second click on QUIT really quits */
 
 void panel_toggle(void) { open = !open; }
 void panel_show_room(void) { open = true; tab = TAB_ROOM; }
@@ -94,6 +95,10 @@ static Rectangle rule_row(int i)  { return (Rectangle){ CX, CY + i * 38.0f, 368,
 static Rectangle valve_btn(void)  { return (Rectangle){ CX + 238, CY + 36, 130, 26 }; }
 static Rectangle breaker_btn(int i) { return (Rectangle){ CX + i * 62.0f, CY + 132, 56, 30 }; }
 
+/* the layout of the SITE tab */
+static Rectangle gen_btn(void)    { return (Rectangle){ CX, CY + 20, 178, 30 }; }
+static Rectangle quit_btn(void)   { return (Rectangle){ CX, CY + 228, 178, 26 }; }
+
 static const char *SHORT[MAX_ROOMS] = { "OFFICE", "HALL", "LOBBY", "KITCHEN", "SERVER", "STORAGE", "", "" };
 
 static const char *SCENE_INFO[MAX_SCENES] = {
@@ -104,6 +109,16 @@ static const char *SCENE_INFO[MAX_SCENES] = {
 };
 static const char SCENE_KEY[MAX_SCENES] = { 'Z', 'X', 'C', 'V' };
 
+static Color weather_colour(WeatherId w)
+{
+    switch (w) {
+        case WEATHER_COLD_SNAP:  return SKYBLUE;
+        case WEATHER_WARM_SPELL: return ORANGE;
+        case WEATHER_STORM:      return PURPLE;
+        default:                 return GREEN;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Input                                                              */
 /* ------------------------------------------------------------------ */
@@ -113,8 +128,10 @@ void panel_update(Building *b)
     if (IsKeyPressed(KEY_SPACE)) open = !open;
     if (!open) return;
 
+    if (quitArmed > 0.0f) quitArmed -= GetFrameTime();
+
     for (int i = 0; i < TAB_COUNT; i++) {
-        if (pressed(tab_rect(i))) { tab = i; ui_click_sound(); }
+        if (pressed(tab_rect(i))) { tab = i; quitArmed = 0.0f; ui_click_sound(); }
     }
 
     Room *room = &b->rooms[b->selectedRoom];
@@ -185,6 +202,23 @@ void panel_update(Building *b)
                     building_set_breaker(b, i, b->rooms[i].breakerTripped);
                     ui_click_sound();
                 }
+            }
+            break;
+
+        case TAB_SITE:
+            /* the generator has its own controls: it works even when the building has no power */
+            if (pressed(gen_btn())) {
+                building_set_generator(b, !b->genOn);
+                ui_click_sound();
+            }
+            /* quitting takes two clicks, so nobody closes the app by accident */
+            if (pressed(quit_btn())) {
+                if (quitArmed > 0.0f) {
+                    building_request_quit(b);
+                } else {
+                    quitArmed = 3.0f;
+                }
+                ui_click_sound();
             }
             break;
 
@@ -323,6 +357,46 @@ static void draw_util_tab(const Building *b)
     }
 }
 
+static void draw_site_tab(const Building *b)
+{
+    /* the backup generator */
+    DrawText("GENERATOR", CX, CY, 12, RAYWHITE);
+    draw_bar((Rectangle){ CX + 80, CY + 2, 150, 10 }, b->genFuel / 100.0f,
+             (b->genFuel > 30.0f) ? GREEN : (b->genFuel > 10.0f) ? ORANGE : RED);
+    DrawText(TextFormat("fuel %.0f%%", b->genFuel), CX + 240, CY, 12, RAYWHITE);
+
+    draw_button(gen_btn(), b->genOn ? "GENERATOR: STOP" : "GENERATOR: START", ORANGE, b->genOn);
+
+    const char *state;
+    Color sc;
+    if (b->genOn && b->genWarmup > 0.0f)      { state = TextFormat("WARMING UP %ds", (int)b->genWarmup + 1); sc = ORANGE; }
+    else if (b->genOn)                         { state = "RUNNING";      sc = GREEN; }
+    else if (b->genFuel <= 0.0f)               { state = "OUT OF FUEL";  sc = RED; }
+    else                                       { state = "OFF";          sc = GRAY; }
+    DrawText(state, CX + 190, CY + 28, 12, sc);
+
+    int fuelSecs = (int)(building_generator_runtime(b) < 5999.0f ? building_generator_runtime(b) : 5999.0f);
+    DrawText(TextFormat("Adds %.2f/s to the battery. The building uses %.2f/s. Fuel lasts %d:%02d.",
+                        0.30f, building_power_usage(b), fuelSecs / 60, fuelSecs % 60),
+             CX, CY + 58, 10, GRAY);
+    DrawText("It works even in a blackout, and brings the building back once the battery recovers.",
+             CX, CY + 72, 10, GRAY);
+
+    /* the weather outside */
+    DrawText("WEATHER", CX, CY + 104, 12, RAYWHITE);
+    DrawText(weather_name(b->weather), CX, CY + 122, 16, weather_colour(b->weather));
+    const char *out = TextFormat("OUTSIDE %.0f C", building_outside_temp(b));
+    DrawText(out, CX + 368 - MeasureText(out, 14), CY + 124, 14, RAYWHITE);
+    DrawText(weather_info(b->weather), CX, CY + 146, 10, GRAY);
+    if (b->weather != WEATHER_NORMAL) {
+        DrawText(TextFormat("Clears in about %d s.", (int)b->weatherTimer + 1), CX, CY + 160, 10, GRAY);
+    }
+
+    /* closing the app */
+    draw_button(quit_btn(), quitArmed > 0.0f ? "CLICK AGAIN TO QUIT" : "QUIT THE APP", RED, quitArmed > 0.0f);
+    DrawText("Esc also closes the window.", CX + 190, CY + 236, 10, GRAY);
+}
+
 static void draw_log_tab(const Building *b)
 {
     for (int i = 0; i < 15; i++) {
@@ -354,6 +428,7 @@ void panel_draw(const Building *b)
         case TAB_SCENES: draw_scenes_tab(b); break;
         case TAB_AUTO:   draw_auto_tab(b);   break;
         case TAB_UTIL:   draw_util_tab(b);   break;
+        case TAB_SITE:   draw_site_tab(b);   break;
         default:         draw_log_tab(b);    break;
     }
 
